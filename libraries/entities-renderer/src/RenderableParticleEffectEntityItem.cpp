@@ -13,6 +13,7 @@
 #include <DependencyManager.h>
 #include <PerfStat.h>
 #include <GeometryCache.h>
+#include <StencilMaskPass.h>
 #include <AbstractViewStateInterface.h>
 #include "EntitiesRendererLogging.h"
 
@@ -160,9 +161,9 @@ RenderableParticleEffectEntityItem::RenderableParticleEffectEntityItem(const Ent
     }
 }
 
-bool RenderableParticleEffectEntityItem::addToScene(EntityItemPointer self,
-                                                    render::ScenePointer scene,
-                                                    render::PendingChanges& pendingChanges) {
+bool RenderableParticleEffectEntityItem::addToScene(const EntityItemPointer& self,
+                                                    const render::ScenePointer& scene,
+                                                    render::Transaction& transaction) {
     _scene = scene;
     _renderItemId = _scene->allocateID();
     auto particlePayloadData = std::make_shared<ParticlePayloadData>();
@@ -171,14 +172,14 @@ bool RenderableParticleEffectEntityItem::addToScene(EntityItemPointer self,
     render::Item::Status::Getters statusGetters;
     makeEntityItemStatusGetters(getThisPointer(), statusGetters);
     renderPayload->addStatusGetters(statusGetters);
-    pendingChanges.resetItem(_renderItemId, renderPayload);
+    transaction.resetItem(_renderItemId, renderPayload);
     return true;
 }
 
-void RenderableParticleEffectEntityItem::removeFromScene(EntityItemPointer self,
-                                                         render::ScenePointer scene,
-                                                         render::PendingChanges& pendingChanges) {
-    pendingChanges.removeItem(_renderItemId);
+void RenderableParticleEffectEntityItem::removeFromScene(const EntityItemPointer& self,
+                                                         const render::ScenePointer& scene,
+                                                         render::Transaction& transaction) {
+    transaction.removeItem(_renderItemId);
     _scene = nullptr;
     render::Item::clearID(_renderItemId);
 };
@@ -206,12 +207,12 @@ void RenderableParticleEffectEntityItem::updateRenderItem() {
         return;
     }
     if (!getVisible()) {
-        render::PendingChanges pendingChanges;
-        pendingChanges.updateItem<ParticlePayloadData>(_renderItemId, [](ParticlePayloadData& payload) {
+        render::Transaction transaction;
+        transaction.updateItem<ParticlePayloadData>(_renderItemId, [](ParticlePayloadData& payload) {
             payload.setVisibleFlag(false);
         });
         
-        _scene->enqueuePendingChanges(pendingChanges);
+        _scene->enqueueTransaction(transaction);
         return;
     }
     
@@ -253,8 +254,8 @@ void RenderableParticleEffectEntityItem::updateRenderItem() {
     }
 
 
-    render::PendingChanges pendingChanges;
-    pendingChanges.updateItem<ParticlePayloadData>(_renderItemId, [=](ParticlePayloadData& payload) {
+    render::Transaction transaction;
+    transaction.updateItem<ParticlePayloadData>(_renderItemId, [=](ParticlePayloadData& payload) {
         payload.setVisibleFlag(true);
         
         // Update particle uniforms
@@ -282,7 +283,7 @@ void RenderableParticleEffectEntityItem::updateRenderItem() {
         }
     });
 
-    _scene->enqueuePendingChanges(pendingChanges);
+    _scene->enqueueTransaction(transaction);
 }
 
 void RenderableParticleEffectEntityItem::createPipelines() {
@@ -292,6 +293,7 @@ void RenderableParticleEffectEntityItem::createPipelines() {
         state->setDepthTest(true, false, gpu::LESS_EQUAL);
         state->setBlendFunction(true, gpu::State::SRC_ALPHA, gpu::State::BLEND_OP_ADD, gpu::State::ONE,
                                 gpu::State::FACTOR_ALPHA, gpu::State::BLEND_OP_ADD, gpu::State::ONE);
+        PrepareStencil::testMask(*state);
 
         auto vertShader = gpu::Shader::createVertex(std::string(untextured_particle_vert));
         auto fragShader = gpu::Shader::createPixel(std::string(untextured_particle_frag));
@@ -305,6 +307,7 @@ void RenderableParticleEffectEntityItem::createPipelines() {
         state->setDepthTest(true, false, gpu::LESS_EQUAL);
         state->setBlendFunction(true, gpu::State::SRC_ALPHA, gpu::State::BLEND_OP_ADD, gpu::State::ONE,
                                 gpu::State::FACTOR_ALPHA, gpu::State::BLEND_OP_ADD, gpu::State::ONE);
+        PrepareStencil::testMask(*state);
 
         auto vertShader = gpu::Shader::createVertex(std::string(textured_particle_vert));
         auto fragShader = gpu::Shader::createPixel(std::string(textured_particle_frag));
@@ -318,9 +321,9 @@ void RenderableParticleEffectEntityItem::notifyBoundChanged() {
     if (!render::Item::isValidID(_renderItemId)) {
         return;
     }
-    render::PendingChanges pendingChanges;
-    pendingChanges.updateItem<ParticlePayloadData>(_renderItemId, [](ParticlePayloadData& payload) {
+    render::Transaction transaction;
+    transaction.updateItem<ParticlePayloadData>(_renderItemId, [](ParticlePayloadData& payload) {
     });
 
-    _scene->enqueuePendingChanges(pendingChanges);
+    _scene->enqueueTransaction(transaction);
 }

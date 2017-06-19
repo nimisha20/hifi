@@ -29,10 +29,12 @@
 #include <udt/PacketHeaders.h>
 #include <ResourceCache.h>
 #include <ScriptCache.h>
-#include <SoundCache.h>
 #include <ScriptEngines.h>
+#include <SoundCache.h>
+#include <UsersScriptingInterface.h>
 #include <UUID.h>
 
+#include <recording/ClipCache.h>
 #include <recording/Deck.h>
 #include <recording/Recorder.h>
 #include <recording/Frame.h>
@@ -53,7 +55,10 @@ static const int RECEIVED_AUDIO_STREAM_CAPACITY_FRAMES = 10;
 
 Agent::Agent(ReceivedMessage& message) :
     ThreadedAssignment(message),
-    _receivedAudioStream(RECEIVED_AUDIO_STREAM_CAPACITY_FRAMES, RECEIVED_AUDIO_STREAM_CAPACITY_FRAMES) {
+    _receivedAudioStream(RECEIVED_AUDIO_STREAM_CAPACITY_FRAMES, RECEIVED_AUDIO_STREAM_CAPACITY_FRAMES),
+    _audioGate(AudioConstants::SAMPLE_RATE, AudioConstants::MONO)
+{
+    _entityEditSender.setPacketsPerSecond(DEFAULT_ENTITY_PPS_PER_SCRIPT);
     DependencyManager::get<EntityScriptingInterface>()->setPacketSender(&_entityEditSender);
 
     ResourceManager::init();
@@ -64,11 +69,17 @@ Agent::Agent(ReceivedMessage& message) :
     DependencyManager::set<SoundCache>();
     DependencyManager::set<AudioScriptingInterface>();
     DependencyManager::set<AudioInjectorManager>();
+
     DependencyManager::set<recording::Deck>();
     DependencyManager::set<recording::Recorder>();
-    DependencyManager::set<RecordingScriptingInterface>();
+    DependencyManager::set<recording::ClipCache>();
+
     DependencyManager::set<ScriptCache>();
     DependencyManager::set<ScriptEngines>(ScriptEngine::AGENT_SCRIPT);
+
+    DependencyManager::set<RecordingScriptingInterface>();
+    DependencyManager::set<UsersScriptingInterface>();
+
 
     auto& packetReceiver = DependencyManager::get<NodeList>()->getPacketReceiver();
 
@@ -155,11 +166,7 @@ void Agent::run() {
 
     // Setup MessagesClient
     auto messagesClient = DependencyManager::set<MessagesClient>();
-    QThread* messagesThread = new QThread;
-    messagesThread->setObjectName("Messages Client Thread");
-    messagesClient->moveToThread(messagesThread);
-    connect(messagesThread, &QThread::started, messagesClient.data(), &MessagesClient::init);
-    messagesThread->start();
+    messagesClient->startThread();
 
     // make sure we hear about connected nodes so we can grab an ATP script if a request is pending
     connect(nodeList.data(), &LimitedNodeList::nodeActivated, this, &Agent::nodeActivated);
@@ -327,6 +334,8 @@ void Agent::executeScript() {
     _scriptEngine = std::unique_ptr<ScriptEngine>(new ScriptEngine(ScriptEngine::AGENT_SCRIPT, _scriptContents, _payload));
     _scriptEngine->setParent(this); // be the parent of the script engine so it gets moved when we do
 
+    DependencyManager::get<RecordingScriptingInterface>()->setScriptEngine(_scriptEngine.get());
+
     // setup an Avatar for the script to use
     auto scriptedAvatar = DependencyManager::get<ScriptableAvatar>();
 
@@ -336,8 +345,16 @@ void Agent::executeScript() {
     // call model URL setters with empty URLs so our avatar, if user, will have the default models
     scriptedAvatar->setSkeletonModelURL(QUrl());
 
+    // force lazy initialization of the head data for the scripted avatar
+    // since it is referenced below by computeLoudness and getAudioLoudness
+    scriptedAvatar->getHeadOrientation();
+
     // give this AvatarData object to the script engine
     _scriptEngine->registerGlobalObject("Avatar", scriptedAvatar.data());
+
+    // give scripts access to the Users object
+    _scriptEngine->registerGlobalObject("Users", DependencyManager::get<UsersScriptingInterface>().data());
+
 
     auto player = DependencyManager::get<recording::Deck>();
     connect(player.data(), &recording::Deck::playbackStateChanged, [=] {
@@ -377,16 +394,24 @@ void Agent::executeScript() {
         QByteArray audio(frame->data);
 
         if (_isNoiseGateEnabled) {
-            static int numSamples = AudioConstants::NETWORK_FRAME_SAMPLES_PER_CHANNEL;
-            _noiseGate.gateSamples(reinterpret_cast<int16_t*>(audio.data()), numSamples);
+            int16_t* samples = reinterpret_cast<int16_t*>(audio.data());
+            int numSamples = AudioConstants::NETWORK_FRAME_SAMPLES_PER_CHANNEL;
+            _audioGate.render(samples, samples, numSamples);
         }
 
         computeLoudness(&audio, scriptedAvatar);
 
-        // the codec needs a flush frame before sending silent packets, so
-        // do not send one if the gate closed in this block (eventually this can be crossfaded).
+        // state machine to detect gate opening and closing
+        bool audioGateOpen = (scriptedAvatar->getAudioLoudness() != 0.0f);
+        bool openedInLastBlock = !_audioGateOpen && audioGateOpen;  // the gate just opened
+        bool closedInLastBlock = _audioGateOpen && !audioGateOpen;  // the gate just closed
+        _audioGateOpen = audioGateOpen;
+        Q_UNUSED(openedInLastBlock);
+
+        // the codec must be flushed to silence before sending silent packets,
+        // so delay the transition to silent packets by one packet after becoming silent.
         auto packetType = PacketType::MicrophoneAudioNoEcho;
-        if (scriptedAvatar->getAudioLoudness() == 0.0f && !_noiseGate.closedInLastBlock()) {
+        if (!audioGateOpen && !closedInLastBlock) {
             packetType = PacketType::SilentAudioFrame;
         }
 
@@ -419,6 +444,7 @@ void Agent::executeScript() {
     _scriptEngine->registerGlobalObject("Agent", this);
 
     _scriptEngine->registerGlobalObject("SoundCache", DependencyManager::get<SoundCache>().data());
+    _scriptEngine->registerGlobalObject("AnimationCache", DependencyManager::get<AnimationCache>().data());
 
     QScriptValue webSocketServerConstructorValue = _scriptEngine->newFunction(WebSocketServerClass::constructor);
     _scriptEngine->globalObject().setProperty("WebSocketServer", webSocketServerConstructorValue);
@@ -464,6 +490,8 @@ void Agent::executeScript() {
 
     Frame::clearFrameHandler(AUDIO_FRAME_TYPE);
     Frame::clearFrameHandler(AVATAR_FRAME_TYPE);
+
+    DependencyManager::destroy<RecordingScriptingInterface>();
 
     setFinished(true);
 }
@@ -522,7 +550,7 @@ void Agent::setIsAvatar(bool isAvatar) {
         connect(_avatarIdentityTimer, &QTimer::timeout, this, &Agent::sendAvatarIdentityPacket);
 
         // start the timers
-        _avatarIdentityTimer->start(AVATAR_IDENTITY_PACKET_SEND_INTERVAL_MSECS);
+        _avatarIdentityTimer->start(AVATAR_IDENTITY_PACKET_SEND_INTERVAL_MSECS);  // FIXME - we shouldn't really need to constantly send identity packets
 
         // tell the avatarAudioTimer to start ticking
         emit startAvatarAudioTimer();
@@ -561,6 +589,7 @@ void Agent::setIsAvatar(bool isAvatar) {
 void Agent::sendAvatarIdentityPacket() {
     if (_isAvatar) {
         auto scriptedAvatar = DependencyManager::get<ScriptableAvatar>();
+        scriptedAvatar->markIdentityDataChanged();
         scriptedAvatar->sendIdentityPacket();
     }
 }
@@ -596,19 +625,21 @@ void Agent::encodeFrameOfZeros(QByteArray& encodedZeros) {
 }
 
 void Agent::computeLoudness(const QByteArray* decodedBuffer, QSharedPointer<ScriptableAvatar> scriptableAvatar) {
-    float loudness = 0.0f;
+    float lastInputLoudness = 0.0f;
     if (decodedBuffer) {
-        auto soundData = reinterpret_cast<const int16_t*>(decodedBuffer->constData());
-        int numFrames = decodedBuffer->size() / sizeof(int16_t);
-        // now iterate and come up with average
-        if (numFrames > 0) {
-            for(int i = 0; i < numFrames; i++) {
-                loudness += (float) std::abs(soundData[i]);
+        auto samples = reinterpret_cast<const int16_t*>(decodedBuffer->constData());
+        int numSamples = decodedBuffer->size() / AudioConstants::SAMPLE_SIZE;
+
+        assert(numSamples < 65536); // int32_t loudness cannot overflow
+        if (numSamples > 0) {
+            int32_t loudness = 0;
+            for (int i = 0; i < numSamples; ++i) {
+                loudness += std::abs((int32_t)samples[i]);
             }
-            loudness /= numFrames;
+            lastInputLoudness = (float)loudness / numSamples;
         }
     }
-    scriptableAvatar->setAudioLoudness(loudness);
+    scriptableAvatar->setAudioLoudness(lastInputLoudness);
 }
 
 void Agent::processAgentAvatarAudio() {
@@ -748,7 +779,18 @@ void Agent::aboutToFinish() {
 
     // cleanup the AudioInjectorManager (and any still running injectors)
     DependencyManager::destroy<AudioInjectorManager>();
+
+    // destroy all other created dependencies
+    DependencyManager::destroy<ScriptCache>();
     DependencyManager::destroy<ScriptEngines>();
+
+    DependencyManager::destroy<ResourceCacheSharedItems>();
+    DependencyManager::destroy<SoundCache>();
+    DependencyManager::destroy<AudioScriptingInterface>();
+
+    DependencyManager::destroy<recording::Deck>();
+    DependencyManager::destroy<recording::Recorder>();
+    DependencyManager::destroy<recording::ClipCache>();
 
     emit stopAvatarAudioTimer();
     _avatarAudioTimerThread.quit();

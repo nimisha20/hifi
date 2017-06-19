@@ -18,12 +18,14 @@ Original.CheckBox {
     id: checkBox
 
     property int colorScheme: hifi.colorSchemes.light
+    property string color: hifi.colors.lightGray
     readonly property bool isLightColorScheme: colorScheme == hifi.colorSchemes.light
-
+    property bool isRedCheck: false
     property int boxSize: 14
     readonly property int boxRadius: 3
     readonly property int checkSize: Math.max(boxSize - 8, 10)
     readonly property int checkRadius: 2
+    activeFocusOnPress: true
 
     style: CheckBoxStyle {
         indicator: Rectangle {
@@ -35,6 +37,7 @@ Original.CheckBox {
             border.color: pressed || hovered
                           ? hifi.colors.checkboxCheckedBorder
                           : (checkBox.isLightColorScheme ? hifi.colors.checkboxLightFinish : hifi.colors.checkboxDarkFinish)
+
             gradient: Gradient {
                 GradientStop {
                     position: 0.2
@@ -66,9 +69,9 @@ Original.CheckBox {
                 height: checkSize
                 radius: checkRadius
                 anchors.centerIn: parent
-                color: hifi.colors.checkboxChecked
+                color: isRedCheck ? hifi.colors.checkboxCheckedRed : hifi.colors.checkboxChecked
                 border.width: 2
-                border.color: hifi.colors.checkboxCheckedBorder
+                border.color: isRedCheck? hifi.colors.checkboxCheckedBorderRed : hifi.colors.checkboxCheckedBorder
                 visible: checked && !pressed || !checked && pressed
             }
 
@@ -87,8 +90,8 @@ Original.CheckBox {
 
         label: Label {
             text: control.text
-            colorScheme: checkBox.colorScheme
-            x: checkBox.boxSize / 2
+            color: control.color
+            x: 2
             wrapMode: Text.Wrap
             enabled: checkBox.enabled
         }

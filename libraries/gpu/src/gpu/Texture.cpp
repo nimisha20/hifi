@@ -31,8 +31,9 @@ using namespace gpu;
 
 int TexturePointerMetaTypeId = qRegisterMetaType<TexturePointer>();
 
-std::atomic<uint32_t> Texture::_textureCPUCount{ 0 };
-std::atomic<Texture::Size> Texture::_textureCPUMemoryUsage{ 0 };
+
+ContextMetricCount Texture::_textureCPUCount;
+ContextMetricSize Texture::_textureCPUMemSize;
 std::atomic<Texture::Size> Texture::_allowedCPUMemoryUsage { 0 };
 
 
@@ -58,65 +59,23 @@ void Texture::setEnableSparseTextures(bool enabled) {
 #endif
 }
 
-void Texture::updateTextureCPUMemoryUsage(Size prevObjectSize, Size newObjectSize) {
-    if (prevObjectSize == newObjectSize) {
-        return;
-    }
-    if (prevObjectSize > newObjectSize) {
-        _textureCPUMemoryUsage.fetch_sub(prevObjectSize - newObjectSize);
-    } else {
-        _textureCPUMemoryUsage.fetch_add(newObjectSize - prevObjectSize);
-    }
-}
-
 bool Texture::getEnableSparseTextures() { 
     return _enableSparseTextures.load(); 
 }
 
 uint32_t Texture::getTextureCPUCount() {
-    return _textureCPUCount.load();
+    return _textureCPUCount.getValue();
 }
 
-Texture::Size Texture::getTextureCPUMemoryUsage() {
-    return _textureCPUMemoryUsage.load();
+Texture::Size Texture::getTextureCPUMemSize() {
+    return _textureCPUMemSize.getValue();
 }
 
-uint32_t Texture::getTextureGPUCount() {
-    return Context::getTextureGPUCount();
-}
-
-uint32_t Texture::getTextureGPUSparseCount() {
-    return Context::getTextureGPUSparseCount();
-}
-
-Texture::Size Texture::getTextureTransferPendingSize() {
-    return Context::getTextureTransferPendingSize();
-}
-
-Texture::Size Texture::getTextureGPUMemoryUsage() {
-    return Context::getTextureGPUMemoryUsage();
-}
-
-Texture::Size Texture::getTextureGPUVirtualMemoryUsage() {
-    return Context::getTextureGPUVirtualMemoryUsage();
-}
-
-
-Texture::Size Texture::getTextureGPUFramebufferMemoryUsage() {
-    return Context::getTextureGPUFramebufferMemoryUsage();
-}
-
-Texture::Size Texture::getTextureGPUSparseMemoryUsage() {
-    return Context::getTextureGPUSparseMemoryUsage();
-}
-
-uint32_t Texture::getTextureGPUTransferCount() {
-    return Context::getTextureGPUTransferCount();
-}
 
 Texture::Size Texture::getAllowedGPUMemoryUsage() {
     return _allowedCPUMemoryUsage;
 }
+
 
 void Texture::setAllowedGPUMemoryUsage(Size size) {
     qCDebug(gpulogging) << "New MAX texture memory " << BYTES_TO_MB(size) << " MB";
@@ -149,47 +108,55 @@ PixelsPointer MemoryStorage::getMipFace(uint16 level, uint8 face) const {
     return PixelsPointer();
 }
 
+
+Size MemoryStorage::getMipFaceSize(uint16 level, uint8 face) const {
+    PixelsPointer mipFace = getMipFace(level, face);
+    if (mipFace) {
+        return mipFace->getSize();
+    } else {
+        return 0;
+    }
+}
+
 bool MemoryStorage::isMipAvailable(uint16 level, uint8 face) const {
     PixelsPointer mipFace = getMipFace(level, face);
     return (mipFace && mipFace->getSize());
 }
 
-bool MemoryStorage::allocateMip(uint16 level) {
-    bool changed = false;
+void MemoryStorage::allocateMip(uint16 level) {
+    auto faceCount = Texture::NUM_FACES_PER_TYPE[getType()];
     if (level >= _mips.size()) {
-        _mips.resize(level+1, std::vector<PixelsPointer>(Texture::NUM_FACES_PER_TYPE[getType()]));
-        changed = true;
+        _mips.resize(level + 1, std::vector<PixelsPointer>(faceCount));
     }
 
     auto& mip = _mips[level];
-    for (auto& face : mip) {
-        if (!face) {
-            changed = true;
-        }
+    if (mip.size() != faceCount) {
+        mip.resize(faceCount);
     }
-
     bumpStamp();
-
-    return changed;
 }
 
 void MemoryStorage::assignMipData(uint16 level, const storage::StoragePointer& storagePointer) {
-
     allocateMip(level);
     auto& mip = _mips[level];
+
+    auto faceCount = Texture::NUM_FACES_PER_TYPE[getType()];
 
     // here we grabbed an array of faces
     // The bytes assigned here are supposed to contain all the faces bytes of the mip.
     // For tex1D, 2D, 3D there is only one face
     // For Cube, we expect the 6 faces in the order X+, X-, Y+, Y-, Z+, Z-
-    auto sizePerFace = storagePointer->size() / mip.size();
-    size_t offset = 0;
-    for (auto& face : mip) {
-        face = storagePointer->createView(sizePerFace, offset);
-        offset += sizePerFace;
-    }
+    auto sizePerFace = storagePointer->size() / faceCount;
 
-    bumpStamp();
+    if (sizePerFace > 0) {
+        size_t offset = 0;
+        for (auto& face : mip) {
+            face = storagePointer->createView(sizePerFace, offset);
+            offset += sizePerFace;
+        }
+
+        bumpStamp();
+    }
 }
 
 
@@ -202,47 +169,47 @@ void Texture::MemoryStorage::assignMipFaceData(uint16 level, uint8 face, const s
     }
 }
 
-Texture* Texture::createExternal(const ExternalRecycler& recycler, const Sampler& sampler) {
-    Texture* tex = new Texture(TextureUsageType::EXTERNAL);
+TexturePointer Texture::createExternal(const ExternalRecycler& recycler, const Sampler& sampler) {
+    TexturePointer tex = std::make_shared<Texture>(TextureUsageType::EXTERNAL);
     tex->_type = TEX_2D;
-    tex->_maxMip = 0;
+    tex->_texelFormat = Element::COLOR_RGBA_32;
+    tex->_maxMipLevel = 0;
     tex->_sampler = sampler;
     tex->setExternalRecycler(recycler);
     return tex;
 }
 
-Texture* Texture::createRenderBuffer(const Element& texelFormat, uint16 width, uint16 height, const Sampler& sampler) {
-    return create(TextureUsageType::RENDERBUFFER, TEX_2D, texelFormat, width, height, 1, 1, 0, sampler);
+TexturePointer Texture::createRenderBuffer(const Element& texelFormat, uint16 width, uint16 height, uint16 numMips, const Sampler& sampler) {
+    return create(TextureUsageType::RENDERBUFFER, TEX_2D, texelFormat, width, height, 1, 1, 0, numMips, sampler);
 }
 
-Texture* Texture::create1D(const Element& texelFormat, uint16 width, const Sampler& sampler) { 
-    return create(TextureUsageType::RESOURCE, TEX_1D, texelFormat, width, 1, 1, 1, 0, sampler);
+TexturePointer Texture::create1D(const Element& texelFormat, uint16 width, uint16 numMips, const Sampler& sampler) {
+    return create(TextureUsageType::RESOURCE, TEX_1D, texelFormat, width, 1, 1, 1, 0, numMips, sampler);
 }
 
-Texture* Texture::create2D(const Element& texelFormat, uint16 width, uint16 height, const Sampler& sampler) {
-    return create(TextureUsageType::RESOURCE, TEX_2D, texelFormat, width, height, 1, 1, 0, sampler);
+TexturePointer Texture::create2D(const Element& texelFormat, uint16 width, uint16 height, uint16 numMips, const Sampler& sampler) {
+    return create(TextureUsageType::RESOURCE, TEX_2D, texelFormat, width, height, 1, 1, 0, numMips, sampler);
 }
 
-Texture* Texture::createStrict(const Element& texelFormat, uint16 width, uint16 height, const Sampler& sampler) {
-    return create(TextureUsageType::STRICT_RESOURCE, TEX_2D, texelFormat, width, height, 1, 1, 0, sampler);
+TexturePointer Texture::createStrict(const Element& texelFormat, uint16 width, uint16 height, uint16 numMips, const Sampler& sampler) {
+    return create(TextureUsageType::STRICT_RESOURCE, TEX_2D, texelFormat, width, height, 1, 1, 0, numMips, sampler);
 }
 
-Texture* Texture::create3D(const Element& texelFormat, uint16 width, uint16 height, uint16 depth, const Sampler& sampler) {
-    return create(TextureUsageType::RESOURCE, TEX_3D, texelFormat, width, height, depth, 1, 0, sampler);
+TexturePointer Texture::create3D(const Element& texelFormat, uint16 width, uint16 height, uint16 depth, uint16 numMips, const Sampler& sampler) {
+    return create(TextureUsageType::RESOURCE, TEX_3D, texelFormat, width, height, depth, 1, 0, numMips, sampler);
 }
 
-Texture* Texture::createCube(const Element& texelFormat, uint16 width, const Sampler& sampler) {
-    return create(TextureUsageType::RESOURCE, TEX_CUBE, texelFormat, width, width, 1, 1, 0, sampler);
+TexturePointer Texture::createCube(const Element& texelFormat, uint16 width, uint16 numMips, const Sampler& sampler) {
+    return create(TextureUsageType::RESOURCE, TEX_CUBE, texelFormat, width, width, 1, 1, 0, numMips, sampler);
 }
 
-Texture* Texture::create(TextureUsageType usageType, Type type, const Element& texelFormat, uint16 width, uint16 height, uint16 depth, uint16 numSamples, uint16 numSlices, const Sampler& sampler)
+TexturePointer Texture::create(TextureUsageType usageType, Type type, const Element& texelFormat, uint16 width, uint16 height, uint16 depth, uint16 numSamples, uint16 numSlices, uint16 numMips, const Sampler& sampler)
 {
-    Texture* tex = new Texture(usageType);
+    TexturePointer tex = std::make_shared<Texture>(usageType);
     tex->_storage.reset(new MemoryStorage());
     tex->_type = type;
-    tex->_storage->assignTexture(tex);
-    tex->_maxMip = 0;
-    tex->resize(type, texelFormat, width, height, depth, numSamples, numSlices);
+    tex->_storage->assignTexture(tex.get());
+    tex->resize(type, texelFormat, width, height, depth, numSamples, numSlices, numMips);
 
     tex->_sampler = sampler;
 
@@ -251,11 +218,11 @@ Texture* Texture::create(TextureUsageType usageType, Type type, const Element& t
 
 Texture::Texture(TextureUsageType usageType) :
     Resource(), _usageType(usageType) {
-    _textureCPUCount++;
+    _textureCPUCount.increment();
 }
 
 Texture::~Texture() {
-    _textureCPUCount--;
+    _textureCPUCount.decrement();
     if (_usageType == TextureUsageType::EXTERNAL) {
         Texture::ExternalUpdates externalUpdates;
         {
@@ -274,7 +241,7 @@ Texture::~Texture() {
     }
 }
 
-Texture::Size Texture::resize(Type type, const Element& texelFormat, uint16 width, uint16 height, uint16 depth, uint16 numSamples, uint16 numSlices) {
+Texture::Size Texture::resize(Type type, const Element& texelFormat, uint16 width, uint16 height, uint16 depth, uint16 numSamples, uint16 numSlices, uint16 numMips) {
     if (width && height && depth && numSamples) {
         bool changed = false;
 
@@ -309,20 +276,24 @@ Texture::Size Texture::resize(Type type, const Element& texelFormat, uint16 widt
             _depth = depth;
             changed = true;
         }
-        
+
+        if ((_maxMipLevel + 1) != numMips) {
+            _maxMipLevel = safeNumMips(numMips) - 1;
+            changed = true;
+        }
+
+        if (texelFormat != _texelFormat) {
+            _texelFormat = texelFormat;
+            changed = true;
+        }
+
         // Evaluate the new size with the new format
-        uint32_t size = NUM_FACES_PER_TYPE[_type] *_width * _height * _depth * _numSamples * texelFormat.getSize();
+        Size size = NUM_FACES_PER_TYPE[_type] * _height * _depth * evalPaddedSize(_numSamples * _width * _texelFormat.getSize());
 
         // If size change then we need to reset 
         if (changed || (size != getSize())) {
             _size = size;
             _storage->reset();
-            _stamp++;
-        }
-
-        // TexelFormat might have change, but it's mostly interpretation
-        if (texelFormat != _texelFormat) {
-            _texelFormat = texelFormat;
             _stamp++;
         }
 
@@ -335,23 +306,6 @@ Texture::Size Texture::resize(Type type, const Element& texelFormat, uint16 widt
     return _size;
 }
 
-Texture::Size Texture::resize1D(uint16 width, uint16 numSamples) {
-    return resize(TEX_1D, getTexelFormat(), width, 1, 1, numSamples, 0);
-}
-Texture::Size Texture::resize2D(uint16 width, uint16 height, uint16 numSamples) {
-    return resize(TEX_2D, getTexelFormat(), width, height, 1, numSamples, 0);
-}
-Texture::Size Texture::resize3D(uint16 width, uint16 height, uint16 depth, uint16 numSamples) {
-    return resize(TEX_3D, getTexelFormat(), width, height, depth, numSamples, 0);
-}
-Texture::Size Texture::resizeCube(uint16 width, uint16 numSamples) {
-    return resize(TEX_CUBE, getTexelFormat(), width, 1, 1, numSamples, 0);
-}
-
-Texture::Size Texture::reformat(const Element& texelFormat) {
-    return resize(_type, texelFormat, getWidth(), getHeight(), getDepth(), getNumSamples(), _numSlices);
-}
-
 bool Texture::isColorRenderTarget() const {
     return (_texelFormat.getSemantic() == gpu::RGBA);
 }
@@ -360,7 +314,7 @@ bool Texture::isDepthStencilRenderTarget() const {
     return (_texelFormat.getSemantic() == gpu::DEPTH) || (_texelFormat.getSemantic() == gpu::DEPTH_STENCIL);
 }
 
-uint16 Texture::evalDimNumMips(uint16 size) {
+uint16 Texture::evalDimMaxNumMips(uint16 size) {
     double largerDim = size;
     double val = log(largerDim)/log(2.0);
     return 1 + (uint16) val;
@@ -368,7 +322,7 @@ uint16 Texture::evalDimNumMips(uint16 size) {
 
 static const double LOG_2 = log(2.0);
 
-uint16 Texture::evalNumMips(const Vec3u& dimensions) {
+uint16 Texture::evalMaxNumMips(const Vec3u& dimensions) {
     double largerDim = glm::compMax(dimensions);
     double val = log(largerDim) / LOG_2;
     return 1 + (uint16)val;
@@ -376,19 +330,50 @@ uint16 Texture::evalNumMips(const Vec3u& dimensions) {
 
 // The number mips that the texture could have if all existed
 // = log2(max(width, height, depth))
-uint16 Texture::evalNumMips() const {
-    return evalNumMips({ _width, _height, _depth });
+uint16 Texture::evalMaxNumMips() const {
+    return evalMaxNumMips({ _width, _height, _depth });
+}
+
+// Check a num of mips requested against the maximum possible specified
+// if passing -1 then answer the max
+// simply does (askedNumMips == 0 ? maxNumMips : (numstd::min(askedNumMips, maxNumMips))
+uint16 Texture::safeNumMips(uint16 askedNumMips, uint16 maxNumMips) {
+    if (askedNumMips > 0) {
+        return std::min(askedNumMips, maxNumMips);
+    } else {
+        return maxNumMips;
+    }
+}
+
+// Same but applied to this texture's num max mips from evalNumMips()
+uint16 Texture::safeNumMips(uint16 askedNumMips) const {
+    return safeNumMips(askedNumMips, evalMaxNumMips());
+}
+
+Size Texture::evalTotalSize(uint16 startingMip) const {
+    Size size = 0;
+    uint16 minMipLevel = std::max(getMinMip(), startingMip);
+    uint16 maxMipLevel = getMaxMip();
+    for (uint16 level = minMipLevel; level <= maxMipLevel; level++) {
+        size += evalMipSize(level);
+    }
+    return size * getNumSlices();
 }
 
 void Texture::setStoredMipFormat(const Element& format) {
     _storage->setFormat(format);
 }
 
-const Element& Texture::getStoredMipFormat() const {
-    return _storage->getFormat();
+Element Texture::getStoredMipFormat() const {
+    if (_storage) {
+        return _storage->getFormat();
+    } else {
+        return Element();
+    }
 }
 
 void Texture::assignStoredMip(uint16 level, Size size, const Byte* bytes) {
+    // TODO Skip the extra allocation here
     storage::StoragePointer storage = std::make_shared<storage::MemoryStorage>(size, bytes);
     assignStoredMip(level, storage);
 }
@@ -404,7 +389,7 @@ void Texture::assignStoredMip(uint16 level, storage::StoragePointer& storage) {
         if (_autoGenerateMips) {
             return;
         }
-        if (level >= evalNumMips()) {
+        if (level >= getNumMips()) {
             return;
         }
     }
@@ -412,9 +397,12 @@ void Texture::assignStoredMip(uint16 level, storage::StoragePointer& storage) {
     // THen check that the mem texture passed make sense with its format
     Size expectedSize = evalStoredMipSize(level, getStoredMipFormat());
     auto size = storage->size();
-    if (storage->size() == expectedSize) {
+    // NOTE: doing the same thing in all the next block but beeing able to breakpoint with more accuracy
+    if (storage->size() < expectedSize) {
         _storage->assignMipData(level, storage);
-        _maxMip = std::max(_maxMip, level);
+        _stamp++;
+    } else if (size == expectedSize) {
+        _storage->assignMipData(level, storage);
         _stamp++;
     } else if (size > expectedSize) {
         // NOTE: We are facing this case sometime because apparently QImage (from where we get the bits) is generating images
@@ -422,7 +410,6 @@ void Texture::assignStoredMip(uint16 level, storage::StoragePointer& storage) {
         // We should probably consider something a bit more smart to get the correct result but for now (UI elements)
         // it seems to work...
         _storage->assignMipData(level, storage);
-        _maxMip = std::max(_maxMip, level);
         _stamp++;
     }
 }
@@ -433,7 +420,7 @@ void Texture::assignStoredMipFace(uint16 level, uint8 face, storage::StoragePoin
         if (_autoGenerateMips) {
             return;
         }
-        if (level >= evalNumMips()) {
+        if (level >= getNumMips()) {
             return;
         }
     }
@@ -441,9 +428,12 @@ void Texture::assignStoredMipFace(uint16 level, uint8 face, storage::StoragePoin
     // THen check that the mem texture passed make sense with its format
     Size expectedSize = evalStoredMipFaceSize(level, getStoredMipFormat());
     auto size = storage->size();
-    if (size == expectedSize) {
+    // NOTE: doing the same thing in all the next block but beeing able to breakpoint with more accuracy
+    if (size < expectedSize) {
         _storage->assignMipFaceData(level, face, storage);
-        _maxMip = std::max(_maxMip, level);
+        _stamp++;
+    } else if (size == expectedSize) {
+        _storage->assignMipFaceData(level, face, storage);
         _stamp++;
     } else if (size > expectedSize) {
         // NOTE: We are facing this case sometime because apparently QImage (from where we get the bits) is generating images
@@ -451,75 +441,39 @@ void Texture::assignStoredMipFace(uint16 level, uint8 face, storage::StoragePoin
         // We should probably consider something a bit more smart to get the correct result but for now (UI elements)
         // it seems to work...
         _storage->assignMipFaceData(level, face, storage);
-        _maxMip = std::max(_maxMip, level);
         _stamp++;
     }
 }
 
+bool Texture::isStoredMipFaceAvailable(uint16 level, uint8 face) const {
+    return _storage->isMipAvailable(level, face);
+}
 
-uint16 Texture::autoGenerateMips(uint16 maxMip) {
+void Texture::setAutoGenerateMips(bool enable) {
     bool changed = false;
     if (!_autoGenerateMips) {
         changed = true;
         _autoGenerateMips = true;
     }
 
-    auto newMaxMip = std::min((uint16)(evalNumMips() - 1), maxMip);
-    if (newMaxMip != _maxMip) {
-        changed = true;
-        _maxMip = newMaxMip;;
-    }
-
     if (changed) {
         _stamp++;
     }
-
-    return _maxMip;
 }
 
-uint16 Texture::getStoredMipWidth(uint16 level) const {
-    PixelsPointer mipFace = accessStoredMipFace(level);
-    if (mipFace && mipFace->getSize()) {
-        return evalMipWidth(level);
+Size Texture::getStoredMipSize(uint16 level) const {
+    Size size = 0;
+    for (int face = 0; face < getNumFaces(); face++) {
+        if (isStoredMipFaceAvailable(level, face)) {
+            size += getStoredMipFaceSize(level, face);
+        }
     }
-    return 0;
+    return size;
 }
 
-uint16 Texture::getStoredMipHeight(uint16 level) const {
-    PixelsPointer mip = accessStoredMipFace(level);
-    if (mip && mip->getSize()) {
-        return evalMipHeight(level);
-    }
-    return 0;
-}
-
-uint16 Texture::getStoredMipDepth(uint16 level) const {
-    PixelsPointer mipFace = accessStoredMipFace(level);
-    if (mipFace && mipFace->getSize()) {
-        return evalMipDepth(level);
-    }
-    return 0;
-}
-
-uint32 Texture::getStoredMipNumTexels(uint16 level) const {
-    PixelsPointer mipFace = accessStoredMipFace(level);
-    if (mipFace && mipFace->getSize()) {
-        return evalMipWidth(level) * evalMipHeight(level) * evalMipDepth(level);
-    }
-    return 0;
-}
-
-uint32 Texture::getStoredMipSize(uint16 level) const {
-    PixelsPointer mipFace = accessStoredMipFace(level);
-    if (mipFace && mipFace->getSize()) {
-        return evalMipWidth(level) * evalMipHeight(level) * evalMipDepth(level) * getTexelFormat().getSize();
-    }
-    return 0;
-}
-
-gpu::Resource::Size Texture::getStoredSize() const {
-    auto size = 0;
-    for (int level = 0; level < evalNumMips(); ++level) {
+Size Texture::getStoredSize() const {
+    Size size = 0;
+    for (int level = 0; level < getNumMips(); level++) {
         size += getStoredMipSize(level);
     }
     return size;
@@ -772,7 +726,7 @@ bool sphericalHarmonicsFromTexture(const gpu::Texture& cubeTexture, std::vector<
             boffset = 0;
         }
 
-        auto data = cubeTexture.accessStoredMipFace(0,face)->readData();
+        auto data = cubeTexture.accessStoredMipFace(0, face)->readData();
         if (data == nullptr) {
             continue;
         }
@@ -937,7 +891,7 @@ bool TextureSource::isDefined() const {
 
 bool Texture::setMinMip(uint16 newMinMip) {
     uint16 oldMinMip = _minMip;
-    _minMip = std::min(std::max(_minMip, newMinMip), _maxMip);
+    _minMip = std::min(std::max(_minMip, newMinMip), getMaxMip());
     return oldMinMip != _minMip;
 }
 

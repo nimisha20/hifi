@@ -52,8 +52,7 @@
 
 #include "avatar/MyAvatar.h"
 #include "BandwidthRecorder.h"
-#include "Bookmarks.h"
-#include "Camera.h"
+#include "FancyCamera.h"
 #include "ConnectionMonitor.h"
 #include "gpu/Context.h"
 #include "Menu.h"
@@ -74,6 +73,7 @@
 #include <model/Skybox.h>
 #include <ModelScriptingInterface.h>
 
+#include "Sound.h"
 
 class OffscreenGLCanvas;
 class GLCanvas;
@@ -81,6 +81,7 @@ class FaceTracker;
 class MainWindow;
 class AssetUpload;
 class CompositorHelper;
+class AudioInjector;
 
 namespace controller {
     class StateController;
@@ -111,17 +112,7 @@ class Application : public QApplication,
     // TODO? Get rid of those
     friend class OctreePacketProcessor;
 
-private:
-    bool _shouldRunServer { false };
-    QString _runServerPath;
-    RunningMarker _runningMarker;
-
 public:
-    // startup related getter/setters
-    bool shouldRunServer() const { return _shouldRunServer; }
-    bool hasRunServerPath() const { return !_runServerPath.isEmpty(); }
-    QString getRunServerPath() const { return _runServerPath; }
-
     // virtual functions required for PluginContainer
     virtual ui::Menu* getPrimaryMenu() override;
     virtual void requestReset() override { resetSensors(true); }
@@ -136,15 +127,16 @@ public:
 
     enum Event {
         Present = DisplayPlugin::Present,
-        Paint = Present + 1,
-        Lambda = Paint + 1
+        Paint,
+        Idle,
+        Lambda
     };
 
     // FIXME? Empty methods, do we still need them?
     static void initPlugins(const QStringList& arguments);
     static void shutdownPlugins();
 
-    Application(int& argc, char** argv, QElapsedTimer& startup_time, bool runServer, QString runServerPathOption);
+    Application(int& argc, char** argv, QElapsedTimer& startup_time, bool runningMarkerExisted);
     ~Application();
 
     void postLambdaEvent(std::function<void()> f) override;
@@ -175,8 +167,8 @@ public:
 
     bool isThrottleRendering() const;
 
-    Camera* getCamera() { return &_myCamera; }
-    const Camera* getCamera() const { return &_myCamera; }
+    Camera& getCamera() { return _myCamera; }
+    const Camera& getCamera() const { return _myCamera; }
     // Represents the current view frustum of the avatar.
     void copyViewFrustum(ViewFrustum& viewOut) const;
     // Represents the view frustum of the current rendering pass,
@@ -189,7 +181,6 @@ public:
     QUndoStack* getUndoStack() { return &_undoStack; }
     MainWindow* getWindow() const { return _window; }
     EntityTreePointer getEntityClipboard() const { return _entityClipboard; }
-    EntityTreeRenderer* getEntityClipboardRenderer() { return &_entityClipboardRenderer; }
     EntityEditPacketSender* getEntityEditPacketSender() { return &_entityEditSender; }
 
     ivec2 getMouse() const;
@@ -220,8 +211,6 @@ public:
     void setDesktopTabletBecomesToolbarSetting(bool value);
     bool getHmdTabletBecomesToolbarSetting() { return _hmdTabletBecomesToolbarSetting.get(); }
     void setHmdTabletBecomesToolbarSetting(bool value);
-    bool getTabletVisibleToOthersSetting() { return _tabletVisibleToOthersSetting.get(); }
-    void setTabletVisibleToOthersSetting(bool value);
     bool getPreferAvatarFingerOverStylus() { return _preferAvatarFingerOverStylusSetting.get(); }
     void setPreferAvatarFingerOverStylus(bool value);
 
@@ -263,7 +252,6 @@ public:
     glm::mat4 getEyeProjection(int eye) const;
 
     QRect getDesirableApplicationGeometry() const;
-    Bookmarks* getBookmarks() const { return _bookmarks; }
 
     virtual bool canAcceptURL(const QString& url) const override;
     virtual bool acceptURL(const QString& url, bool defaultUpload = false) override;
@@ -272,7 +260,7 @@ public:
     int getMaxOctreePacketsPerSecond() const;
 
     render::ScenePointer getMain3DScene() override { return _main3DScene; }
-    render::ScenePointer getMain3DScene() const { return _main3DScene; }
+    const render::ScenePointer& getMain3DScene() const { return _main3DScene; }
     render::EnginePointer getRenderEngine() override { return _renderEngine; }
     gpu::ContextPointer getGPUContext() const { return _gpuContext; }
 
@@ -282,7 +270,7 @@ public:
 
     float getAvatarSimrate() const { return _avatarSimCounter.rate(); }
     float getAverageSimsPerSecond() const { return _simCounter.rate(); }
-    
+
     void takeSnapshot(bool notify, bool includeAnimated = false, float aspectRatio = 0.0f);
     void shareSnapshot(const QString& filename, const QUrl& href = QUrl(""));
 
@@ -325,13 +313,14 @@ public slots:
     void updateThreadPoolCount() const;
     void updateSystemTabletMode();
 
-    static void setLowVelocityFilter(bool lowVelocityFilter);
     Q_INVOKABLE void loadDialog();
     Q_INVOKABLE void loadScriptURLDialog() const;
     void toggleLogDialog();
     void toggleEntityScriptServerLogDialog();
-    void toggleRunningScriptsWidget() const;
     Q_INVOKABLE void showAssetServerWidget(QString filePath = "");
+    Q_INVOKABLE void loadAddAvatarBookmarkDialog() const;
+
+    void showDialog(const QUrl& widgetUrl, const QUrl& tabletUrl, const QString& name) const;
 
     // FIXME: Move addAssetToWorld* methods to own class?
     void addAssetToWorldFromURL(QString url);
@@ -371,6 +360,7 @@ public slots:
     static void showHelp();
 
     void cycleCamera();
+    void cameraModeChanged();
     void cameraMenuChanged();
     void toggleOverlays();
     void setOverlaysVisible(bool visible);
@@ -399,19 +389,23 @@ public slots:
 
     void addAssetToWorldMessageClose();
 
-    Q_INVOKABLE void toggleMuteAudio();
+    void loadLODToolsDialog();
+    void loadEntityStatisticsDialog();
+    void loadDomainConnectionDialog();
+    void showScriptLogs();
 
 private slots:
     void showDesktop();
     void clearDomainOctreeDetails();
-    void aboutToQuit();
+    void clearDomainAvatars();
+    void onAboutToQuit();
 
     void resettingDomain();
 
-    void audioMuteToggled() const;
     void faceTrackerMuteToggled();
 
     void activeChanged(Qt::ApplicationState state);
+    void windowMinimizedChanged(bool minimized);
 
     void notifyPacketVersionMismatch();
 
@@ -443,6 +437,8 @@ private slots:
     void addAssetToWorldInfoTimeout();
     void addAssetToWorldErrorTimeout();
 
+    void handleSandboxStatus(QNetworkReply* reply);
+    void switchDisplayMode();
 private:
     static void initDisplay();
     void init();
@@ -459,9 +455,6 @@ private:
     void updateDialogs(float deltaTime) const;
 
     void queryOctree(NodeType_t serverType, PacketType packetType, NodeToJurisdictionMap& jurisdictions, bool forceResend = false);
-    static void loadViewFrustum(Camera& camera, ViewFrustum& viewFrustum);
-
-    glm::vec3 getSunDirection() const;
 
     void renderRearViewMirror(RenderArgs* renderArgs, const QRect& region, bool isZoomed);
 
@@ -506,7 +499,7 @@ private:
     static void dragEnterEvent(QDragEnterEvent* event);
 
     void maybeToggleMenuVisible(QMouseEvent* event) const;
-    void toggleTabletUI() const;
+    void toggleTabletUI(bool shouldOpen = false) const;
 
     MainWindow* _window;
     QElapsedTimer& _sessionRunTimer;
@@ -530,6 +523,7 @@ private:
     RateCounter<> _avatarSimCounter;
     RateCounter<> _simCounter;
 
+    QTimer _minimizedWindowTimer;
     QElapsedTimer _timerStart;
     QElapsedTimer _lastTimeUpdated;
 
@@ -537,7 +531,6 @@ private:
     PhysicalEntitySimulationPointer _entitySimulation;
     PhysicsEnginePointer _physicsEngine;
 
-    EntityTreeRenderer _entityClipboardRenderer;
     EntityTreePointer _entityClipboard;
 
     mutable QMutex _viewMutex { QMutex::Recursive };
@@ -555,7 +548,7 @@ private:
     SimpleMovingAverage _avatarSimsPerSecond {10};
     int _avatarSimsPerSecondReport {0};
     quint64 _lastAvatarSimsPerSecondUpdate {0};
-    Camera _myCamera;                            // My view onto the world
+    FancyCamera _myCamera;                            // My view onto the world
 
     Setting::Handle<QString> _previousScriptLocation;
     Setting::Handle<float> _fieldOfView;
@@ -563,7 +556,6 @@ private:
     Setting::Handle<float> _desktopTabletScale;
     Setting::Handle<bool> _desktopTabletBecomesToolbarSetting;
     Setting::Handle<bool> _hmdTabletBecomesToolbarSetting;
-    Setting::Handle<bool> _tabletVisibleToOthersSetting;
     Setting::Handle<bool> _preferAvatarFingerOverStylusSetting;
     Setting::Handle<bool> _constrainToolbarPosition;
 
@@ -595,8 +587,6 @@ private:
     quint64 _lastSendDownstreamAudioStats;
 
     bool _aboutToQuit;
-
-    Bookmarks* _bookmarks;
 
     bool _notifiedPacketVersionMismatchThisDomain;
 
@@ -683,7 +673,13 @@ private:
     QTimer _addAssetToWorldErrorTimer;
 
     FileScriptingInterface* _fileDownload;
+    AudioInjector* _snapshotSoundInjector { nullptr };
+    SharedSoundPointer _snapshotSound;
+	
+    DisplayPluginPointer _autoSwitchDisplayModeSupportedHMDPlugin;
+    QString _autoSwitchDisplayModeSupportedHMDPluginName;
+    bool _previousHMDWornStatus;
+    void startHMDStandBySession();
+    void endHMDSession();
 };
-
-
 #endif // hifi_Application_h

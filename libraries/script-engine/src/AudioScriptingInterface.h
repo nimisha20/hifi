@@ -24,9 +24,11 @@ class AudioScriptingInterface : public QObject, public Dependency {
     SINGLETON_DEPENDENCY
 
 public:
+    virtual ~AudioScriptingInterface() {}
     void setLocalAudioInterface(AbstractAudioInterface* audioInterface) { _localAudioInterface = audioInterface; }
 
 protected:
+    AudioScriptingInterface() {}
 
     // this method is protected to stop C++ callers from calling, but invokable from script
     Q_INVOKABLE ScriptAudioInjector* playSound(SharedSoundPointer sound, const AudioInjectorOptions& injectorOptions = AudioInjectorOptions());
@@ -43,9 +45,7 @@ signals:
     void inputReceived(const QByteArray& inputSamples); /// a frame of mic input audio has been received and processed
 
 private:
-    AudioScriptingInterface();
-
-    AbstractAudioInterface* _localAudioInterface;
+    AbstractAudioInterface* _localAudioInterface { nullptr };
 };
 
 void registerAudioMetaTypes(QScriptEngine* engine);

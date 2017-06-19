@@ -25,7 +25,7 @@
     var canWriteAssets = false;
     var xmlHttpRequest = null;
     var isPreparing = false;  // Explicitly track download request status.
-
+    
     function injectCommonCode(isDirectoryPage) {
 
         // Supporting styles from marketplaces.css.

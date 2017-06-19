@@ -123,7 +123,7 @@ var viewHelpers = {
 
           form_group += "<input type='" + input_type + "'" +  common_attrs() +
             "placeholder='" + (_.has(setting, 'placeholder') ? setting.placeholder : "") +
-            "' value='" + setting_value + "'/>"
+            "' value='" + (_.has(setting, 'password_placeholder') ? setting.password_placeholder : setting_value) + "'/>"
         }
 
         form_group += "<span class='help-block'>" + setting.help + "</span>"
@@ -222,6 +222,14 @@ $(document).ready(function(){
 
             // set focus to the first input in the new row
             $target.closest('table').find('tr.inputs input:first').focus();
+          }
+          
+          var tableRows = sibling.parent();
+          var tableBody = tableRows.parent();
+          
+          // if theres no more siblings, we should jump to a new row
+          if (sibling.next().length == 0 && tableRows.nextAll().length == 1) {
+              tableBody.find("." + Settings.ADD_ROW_BUTTON_CLASS).click();
           }
         }
 
@@ -981,40 +989,38 @@ function saveSettings() {
 
   if (validateInputs()) {
     // POST the form JSON to the domain-server settings.json endpoint so the settings are saved
+    var canPost = true;
 
     // disable any inputs not changed
-    $("input:not([data-changed])").each(function(){
+    $("input:not([data-changed])").each(function () {
       $(this).prop('disabled', true);
     });
 
     // grab a JSON representation of the form via form2js
     var formJSON = form2js('settings-form', ".", false, cleanupFormValues, true);
 
-    // check if we've set the basic http password - if so convert it to base64
+    // check if we've set the basic http password
     if (formJSON["security"]) {
+
       var password = formJSON["security"]["http_password"];
-      if (password && password.length > 0) {
+      var verify_password = formJSON["security"]["verify_http_password"];
+
+      // if they've only emptied out the default password field, we should go ahead and acknowledge 
+      // the verify password field
+      if (password != undefined && verify_password == undefined) {
+        verify_password = "";
+      }
+
+      // if we have a password and its verification, convert it to sha256 for comparison
+      if (password != undefined && verify_password != undefined) {
         formJSON["security"]["http_password"] = sha256_digest(password);
-      }
-      var verify_password = formJSON["security"]["verify_http_password"];
-      if (verify_password && verify_password.length > 0) {
         formJSON["security"]["verify_http_password"] = sha256_digest(verify_password);
-      }
-    }
 
-    // verify that the password and confirmation match before saving
-    var canPost = true;
-
-    if (formJSON["security"]) {
-      var password = formJSON["security"]["http_password"];
-      var verify_password = formJSON["security"]["verify_http_password"];
-
-      if (password && password.length > 0) {
-        if (password != verify_password) {
-          bootbox.alert({"message": "Passwords must match!", "title":"Password Error"});
-          canPost = false;
-        } else {
+        if (password == verify_password) {
           delete formJSON["security"]["verify_http_password"];
+        } else {
+          bootbox.alert({ "message": "Passwords must match!", "title": "Password Error" });
+          canPost = false;
         }
       }
     }
@@ -1023,7 +1029,7 @@ function saveSettings() {
     console.log(formJSON);
 
     // re-enable all inputs
-    $("input").each(function(){
+    $("input").each(function () {
       $(this).prop('disabled', false);
     });
 
@@ -1031,6 +1037,27 @@ function saveSettings() {
     $(this).blur();
 
     if (canPost) {
+      if (formJSON["security"]) {
+        var username = formJSON["security"]["http_username"];
+        var password = formJSON["security"]["http_password"];
+
+        if ((password == sha256_digest("")) && (username == undefined || (username && username.length != 0))) {
+          swal({
+            title: "Are you sure?",
+            text: "You have entered a blank password with a non-blank username. Are you sure you want to require a blank password?",
+            type: "warning",
+            showCancelButton: true,
+            confirmButtonColor: "#5cb85c",
+            confirmButtonText: "Yes!",
+            closeOnConfirm: true
+          },
+          function () {
+              formJSON["security"]["http_password"] = "";
+              postSettings(formJSON);
+          });
+          return;
+        }
+      }
       // POST the form JSON to the domain-server settings.json endpoint so the settings are saved
       postSettings(formJSON);
     }
@@ -1301,6 +1328,18 @@ function makeTableCategoryInput(setting, numVisibleColumns) {
   return html;
 }
 
+function getDescriptionForKey(key) {
+  for (var i in Settings.data.descriptions) {
+    if (Settings.data.descriptions[i].name === key) {
+      return Settings.data.descriptions[i];
+    }
+  }
+}
+
+var SAVE_BUTTON_LABEL_SAVE = "Save";
+var SAVE_BUTTON_LABEL_RESTART = "Save and restart";
+var reasonsForRestart = [];
+
 function badgeSidebarForDifferences(changedElement) {
   // figure out which group this input is in
   var panelParentID = changedElement.closest('.panel').attr('id');
@@ -1323,13 +1362,24 @@ function badgeSidebarForDifferences(changedElement) {
   }
 
   var badgeValue = 0
+  var description = getDescriptionForKey(panelParentID);
 
   // badge for any settings we have that are not the same or are not present in initialValues
   for (var setting in panelJSON) {
     if ((!_.has(initialPanelJSON, setting) && panelJSON[setting] !== "") ||
       (!_.isEqual(panelJSON[setting], initialPanelJSON[setting])
       && (panelJSON[setting] !== "" || _.has(initialPanelJSON, setting)))) {
-      badgeValue += 1
+      badgeValue += 1;
+
+      // add a reason to restart
+      if (description && description.restart != false) {
+        reasonsForRestart.push(setting);
+      }
+    } else {
+        // remove a reason to restart
+        if (description && description.restart != false) {
+          reasonsForRestart = $.grep(reasonsForRestart, function(v) { return v != setting; });
+      }
     }
   }
 
@@ -1338,6 +1388,7 @@ function badgeSidebarForDifferences(changedElement) {
     badgeValue = ""
   }
 
+  $(".save-button").html(reasonsForRestart.length > 0 ? SAVE_BUTTON_LABEL_RESTART : SAVE_BUTTON_LABEL_SAVE);
   $("a[href='#" + panelParentID + "'] .badge").html(badgeValue);
 }
 
@@ -1359,6 +1410,8 @@ function addTableRow(row) {
   var table = row.parents("table");
   var setting_name = table.attr("name");
   row.addClass(Settings.DATA_ROW_CLASS + " " + Settings.NEW_ROW_CLASS);
+
+  var focusChanged = false;
 
   _.each(row.children(), function(element) {
     if ($(element).hasClass("numbered")) {
@@ -1408,6 +1461,11 @@ function addTableRow(row) {
         keyInput.on('change', function(){
           input.attr("name", setting_name + "." +  $(this).val() + "." + colName);
         });
+      }
+
+      if (!focusChanged) {
+          input.focus();
+          focusChanged = true;
       }
 
       if (isCheckbox) {

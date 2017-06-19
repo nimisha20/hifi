@@ -11,15 +11,16 @@
 
 #include <AudioClient.h>
 #include <SettingHandle.h>
+#include <trackers/FaceTracker.h>
 
 #include "Application.h"
-#include "devices/FaceTracker.h"
 #include "Menu.h"
 
 HIFI_QML_DEF(AvatarInputs)
 
-
 static AvatarInputs* INSTANCE{ nullptr };
+
+Setting::Handle<bool> showAudioToolsSetting { QStringList { "AvatarInputs", "showAudioTools" }, false };
 
 AvatarInputs* AvatarInputs::getInstance() {
     if (!INSTANCE) {
@@ -32,6 +33,7 @@ AvatarInputs* AvatarInputs::getInstance() {
 
 AvatarInputs::AvatarInputs(QQuickItem* parent) :  QQuickItem(parent) {
     INSTANCE = this;
+    _showAudioTools = showAudioToolsSetting.get();
 }
 
 #define AI_UPDATE(name, src) \
@@ -46,29 +48,19 @@ AvatarInputs::AvatarInputs(QQuickItem* parent) :  QQuickItem(parent) {
 #define AI_UPDATE_FLOAT(name, src, epsilon) \
     { \
         float val = src; \
-        if (fabs(_##name - val) >= epsilon) { \
+        if (fabsf(_##name - val) >= epsilon) { \
             _##name = val; \
             emit name##Changed(); \
         } \
     }
 
-void AvatarInputs::update() {
-    if (!Menu::getInstance()) {
-        return;
-    }
-    AI_UPDATE(cameraEnabled, !Menu::getInstance()->isOptionChecked(MenuOption::NoFaceTracking));
-    AI_UPDATE(cameraMuted, Menu::getInstance()->isOptionChecked(MenuOption::MuteFaceTracking));
-    AI_UPDATE(isHMD, qApp->isHMDMode());
-    AI_UPDATE(showAudioTools, Menu::getInstance()->isOptionChecked(MenuOption::AudioTools));
-
-    auto audioIO = DependencyManager::get<AudioClient>();
+float AvatarInputs::loudnessToAudioLevel(float loudness) {
     const float AUDIO_METER_AVERAGING = 0.5;
     const float LOG2 = log(2.0f);
     const float METER_LOUDNESS_SCALE = 2.8f / 5.0f;
     const float LOG2_LOUDNESS_FLOOR = 11.0f;
     float audioLevel = 0.0f;
-    auto audio = DependencyManager::get<AudioClient>();
-    float loudness = audio->getLastInputLoudness() + 1.0f;
+    loudness += 1.0f;
 
     _trailingAudioLoudness = AUDIO_METER_AVERAGING * _trailingAudioLoudness + (1.0f - AUDIO_METER_AVERAGING) * loudness;
 
@@ -82,7 +74,23 @@ void AvatarInputs::update() {
     if (audioLevel > 1.0f) {
         audioLevel = 1.0;
     }
-    AI_UPDATE_FLOAT(audioLevel, audioLevel, 0.01);
+    return audioLevel;
+}
+
+void AvatarInputs::update() {
+    if (!Menu::getInstance()) {
+        return;
+    }
+
+    AI_UPDATE(cameraEnabled, !Menu::getInstance()->isOptionChecked(MenuOption::NoFaceTracking));
+    AI_UPDATE(cameraMuted, Menu::getInstance()->isOptionChecked(MenuOption::MuteFaceTracking));
+    AI_UPDATE(isHMD, qApp->isHMDMode());
+
+    auto audioIO = DependencyManager::get<AudioClient>();
+
+    const float audioLevel = loudnessToAudioLevel(DependencyManager::get<AudioClient>()->getLastInputLoudness());
+
+    AI_UPDATE_FLOAT(audioLevel, audioLevel, 0.01f);
     AI_UPDATE(audioClipping, ((audioIO->getTimeSinceLastClip() > 0.0f) && (audioIO->getTimeSinceLastClip() < 1.0f)));
     AI_UPDATE(audioMuted, audioIO->isMuted());
 
@@ -98,6 +106,15 @@ void AvatarInputs::update() {
     //float t = (float)(now - _iconPulseTimeReference) / (float)USECS_PER_SECOND;
     //float pulseFactor = (glm::cos(t * PULSE_FREQUENCY * 2.0f * PI) + 1.0f) / 2.0f;
     //iconColor = PULSE_MIN + (PULSE_MAX - PULSE_MIN) * pulseFactor;
+}
+
+void AvatarInputs::setShowAudioTools(bool showAudioTools) {
+    if (_showAudioTools == showAudioTools)
+        return;
+
+    _showAudioTools = showAudioTools;
+    showAudioToolsSetting.set(_showAudioTools);
+    emit showAudioToolsChanged(_showAudioTools);
 }
 
 void AvatarInputs::toggleCameraMute() {

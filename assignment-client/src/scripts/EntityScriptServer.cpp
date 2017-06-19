@@ -236,11 +236,7 @@ void EntityScriptServer::run() {
 
     // Setup MessagesClient
     auto messagesClient = DependencyManager::set<MessagesClient>();
-    QThread* messagesThread = new QThread;
-    messagesThread->setObjectName("Messages Client Thread");
-    messagesClient->moveToThread(messagesThread);
-    connect(messagesThread, &QThread::started, messagesClient.data(), &MessagesClient::init);
-    messagesThread->start();
+    messagesClient->startThread();
 
     DomainHandler& domainHandler = DependencyManager::get<NodeList>()->getDomainHandler();
     connect(&domainHandler, &DomainHandler::settingsReceived, this, &EntityScriptServer::handleSettings);
@@ -481,14 +477,14 @@ void EntityScriptServer::deletingEntity(const EntityItemID& entityID) {
     }
 }
 
-void EntityScriptServer::entityServerScriptChanging(const EntityItemID& entityID, const bool reload) {
+void EntityScriptServer::entityServerScriptChanging(const EntityItemID& entityID, bool reload) {
     if (_entityViewer.getTree() && !_shuttingDown) {
         _entitiesScriptEngine->unloadEntityScript(entityID, true);
         checkAndCallPreload(entityID, reload);
     }
 }
 
-void EntityScriptServer::checkAndCallPreload(const EntityItemID& entityID, const bool reload) {
+void EntityScriptServer::checkAndCallPreload(const EntityItemID& entityID, bool reload) {
     if (_entityViewer.getTree() && !_shuttingDown && _entitiesScriptEngine) {
 
         EntityItemPointer entity = _entityViewer.getTree()->findEntityByEntityItemID(entityID);

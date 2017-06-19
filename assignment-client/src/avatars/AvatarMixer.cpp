@@ -71,15 +71,10 @@ AvatarMixer::~AvatarMixer() {
 
 void AvatarMixer::sendIdentityPacket(AvatarMixerClientData* nodeData, const SharedNodePointer& destinationNode) {
     QByteArray individualData = nodeData->getAvatar().identityByteArray();
-
-    auto identityPacket = NLPacket::create(PacketType::AvatarIdentity, individualData.size());
-
     individualData.replace(0, NUM_BYTES_RFC4122_UUID, nodeData->getNodeID().toRfc4122());
-
-    identityPacket->write(individualData);
-
-    DependencyManager::get<NodeList>()->sendPacket(std::move(identityPacket), *destinationNode);
-
+    auto identityPackets = NLPacketList::create(PacketType::AvatarIdentity, QByteArray(), true, true);
+    identityPackets->write(individualData);
+    DependencyManager::get<NodeList>()->sendPacketList(std::move(identityPackets), *destinationNode);
     ++_sumIdentityPackets;
 }
 
@@ -137,7 +132,7 @@ void AvatarMixer::start() {
             auto start = usecTimestampNow();
             nodeList->nestedEach([&](NodeList::const_iterator cbegin, NodeList::const_iterator cend) {
                 std::for_each(cbegin, cend, [&](const SharedNodePointer& node) {
-                    manageDisplayName(node);
+                    manageIdentityData(node);
                     ++_sumListeners;
                 });
             }, &lockWait, &nodeTransform, &functor);
@@ -187,9 +182,10 @@ void AvatarMixer::start() {
 
 
 // NOTE: nodeData->getAvatar() might be side effected, must be called when access to node/nodeData
-// is guarenteed to not be accessed by other thread
-void AvatarMixer::manageDisplayName(const SharedNodePointer& node) {
+// is guaranteed to not be accessed by other thread
+void AvatarMixer::manageIdentityData(const SharedNodePointer& node) {
     AvatarMixerClientData* nodeData = reinterpret_cast<AvatarMixerClientData*>(node->getLinkedData());
+    bool sendIdentity = false;
     if (nodeData && nodeData->getAvatarSessionDisplayNameMustChange()) {
         AvatarData& avatar = nodeData->getAvatar();
         const QString& existingBaseDisplayName = nodeData->getBaseDisplayName();
@@ -200,7 +196,7 @@ void AvatarMixer::manageDisplayName(const SharedNodePointer& node) {
         QString baseName = avatar.getDisplayName().trimmed();
         const QRegularExpression curses { "fuck|shit|damn|cock|cunt" }; // POC. We may eventually want something much more elaborate (subscription?).
         baseName = baseName.replace(curses, "*"); // Replace rather than remove, so that people have a clue that the person's a jerk.
-        const QRegularExpression trailingDigits { "\\s*_\\d+$" }; // whitespace "_123"
+        const QRegularExpression trailingDigits { "\\s*(_\\d+\\s*)?(\\s*\\n[^$]*)?$" }; // trailing whitespace "_123" and any subsequent lines
         baseName = baseName.remove(trailingDigits);
         if (baseName.isEmpty()) {
             baseName = "anonymous";
@@ -215,9 +211,39 @@ void AvatarMixer::manageDisplayName(const SharedNodePointer& node) {
         soFar.second++; // refcount
         nodeData->flagIdentityChange();
         nodeData->setAvatarSessionDisplayNameMustChange(false);
-        sendIdentityPacket(nodeData, node); // Tell node whose name changed about its new session display name.
+        sendIdentity = true;
         qCDebug(avatars) << "Giving session display name" << sessionDisplayName << "to node with ID" << node->getUUID();
     }
+    if (nodeData && nodeData->getAvatarSkeletonModelUrlMustChange()) { // never true for an empty _avatarWhitelist
+        nodeData->setAvatarSkeletonModelUrlMustChange(false);
+        AvatarData& avatar = nodeData->getAvatar();
+        static const QUrl emptyURL("");
+        QUrl url = avatar.cannonicalSkeletonModelURL(emptyURL);
+        if (!isAvatarInWhitelist(url)) {
+            qCDebug(avatars) << "Forbidden avatar" << nodeData->getNodeID() << avatar.getSkeletonModelURL() << "replaced with" << (_replacementAvatar.isEmpty() ? "default" : _replacementAvatar);
+            avatar.setSkeletonModelURL(_replacementAvatar);
+            sendIdentity = true;
+        }
+    }
+    if (sendIdentity) {
+        sendIdentityPacket(nodeData, node); // Tell node whose name changed about its new session display name or avatar.
+    }
+}
+
+bool AvatarMixer::isAvatarInWhitelist(const QUrl& url) {
+    // The avatar is in the whitelist if:
+    // 1. The avatar's URL's host matches one of the hosts of the URLs in the whitelist AND
+    // 2. The avatar's URL's path starts with the path of that same URL in the whitelist
+    for (const auto& whiteListedPrefix : _avatarWhitelist) {
+        auto whiteListURL = QUrl::fromUserInput(whiteListedPrefix);
+        // check if this script URL matches the whitelist domain and, optionally, is beneath the path
+        if (url.host().compare(whiteListURL.host(), Qt::CaseInsensitive) == 0 &&
+            url.path().startsWith(whiteListURL.path(), Qt::CaseInsensitive)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void AvatarMixer::throttle(std::chrono::microseconds duration, int frame) {
@@ -407,12 +433,16 @@ void AvatarMixer::handleAvatarIdentityPacket(QSharedPointer<ReceivedMessage> mes
             AvatarData::parseAvatarIdentityPacket(message->getMessage(), identity);
             bool identityChanged = false;
             bool displayNameChanged = false;
-            avatar.processAvatarIdentity(identity, identityChanged, displayNameChanged);
+            bool skeletonModelUrlChanged = false;
+            avatar.processAvatarIdentity(identity, identityChanged, displayNameChanged, skeletonModelUrlChanged);
             if (identityChanged) {
                 QMutexLocker nodeDataLocker(&nodeData->getMutex());
                 nodeData->flagIdentityChange();
                 if (displayNameChanged) {
                     nodeData->setAvatarSessionDisplayNameMustChange(true);
+                }
+                if (skeletonModelUrlChanged && !_avatarWhitelist.isEmpty()) {
+                    nodeData->setAvatarSkeletonModelUrlMustChange(true);
                 }
             }
         }
@@ -437,17 +467,20 @@ void AvatarMixer::handleNodeIgnoreRequestPacket(QSharedPointer<ReceivedMessage> 
     while (message->getBytesLeftToRead()) {
         // parse out the UUID being ignored from the packet
         QUuid ignoredUUID = QUuid::fromRfc4122(message->readWithoutCopy(NUM_BYTES_RFC4122_UUID));
-        // Reset the lastBroadcastTime for the ignored avatar to 0
-        // so the AvatarMixer knows it'll have to send identity data about the ignored avatar
-        // to the ignorer if the ignorer unignores.
-        nodeData->setLastBroadcastTime(ignoredUUID, 0);
 
-        // Reset the lastBroadcastTime for the ignorer (FROM THE PERSPECTIVE OF THE IGNORED) to 0
-        // so the AvatarMixer knows it'll have to send identity data about the ignorer
-        // to the ignored if the ignorer unignores.
-        auto ignoredNode = nodeList->nodeWithUUID(ignoredUUID);
-        AvatarMixerClientData* ignoredNodeData = reinterpret_cast<AvatarMixerClientData*>(ignoredNode->getLinkedData());
-        ignoredNodeData->setLastBroadcastTime(senderNode->getUUID(), 0);
+        if (nodeList->nodeWithUUID(ignoredUUID)) {
+            // Reset the lastBroadcastTime for the ignored avatar to 0
+            // so the AvatarMixer knows it'll have to send identity data about the ignored avatar
+            // to the ignorer if the ignorer unignores.
+            nodeData->setLastBroadcastTime(ignoredUUID, 0);
+
+            // Reset the lastBroadcastTime for the ignorer (FROM THE PERSPECTIVE OF THE IGNORED) to 0
+            // so the AvatarMixer knows it'll have to send identity data about the ignorer
+            // to the ignored if the ignorer unignores.
+            auto ignoredNode = nodeList->nodeWithUUID(ignoredUUID);
+            AvatarMixerClientData* ignoredNodeData = reinterpret_cast<AvatarMixerClientData*>(ignoredNode->getLinkedData());
+            ignoredNodeData->setLastBroadcastTime(senderNode->getUUID(), 0);
+        }
 
         if (addToIgnore) {
             senderNode->addIgnoredNode(ignoredUUID);
@@ -667,12 +700,12 @@ void AvatarMixer::sendStatsPacket() {
 
 void AvatarMixer::run() {
     qCDebug(avatars) << "Waiting for connection to domain to request settings from domain-server.";
-    
+
     // wait until we have the domain-server settings, otherwise we bail
     DomainHandler& domainHandler = DependencyManager::get<NodeList>()->getDomainHandler();
     connect(&domainHandler, &DomainHandler::settingsReceived, this, &AvatarMixer::domainSettingsRequestComplete);
     connect(&domainHandler, &DomainHandler::settingsReceiveFail, this, &AvatarMixer::domainSettingsRequestFailed);
-   
+
     ThreadedAssignment::commonInit(AVATAR_MIXER_LOGGING_NAME, NodeType::AvatarMixer);
 
 }
@@ -697,7 +730,7 @@ void AvatarMixer::domainSettingsRequestComplete() {
 
     // parse the settings to pull out the values we need
     parseDomainServerSettings(nodeList->getDomainHandler().getSettingsObject());
-    
+
     // start our tight loop...
     start();
 }
@@ -747,7 +780,7 @@ void AvatarMixer::parseDomainServerSettings(const QJsonObject& domainSettings) {
     } else {
         qCDebug(avatars) << "Avatar mixer will automatically determine number of threads to use. Using:" << _slavePool.numThreads() << "threads.";
     }
-    
+
     const QString AVATARS_SETTINGS_KEY = "avatars";
 
     static const QString MIN_SCALE_OPTION = "min_avatar_scale";
@@ -766,4 +799,19 @@ void AvatarMixer::parseDomainServerSettings(const QJsonObject& domainSettings) {
     qCDebug(avatars) << "This domain requires a minimum avatar scale of" << _domainMinimumScale
                      << "and a maximum avatar scale of" << _domainMaximumScale;
 
+    const QString AVATAR_WHITELIST_DEFAULT{ "" };
+    static const QString AVATAR_WHITELIST_OPTION = "avatar_whitelist";
+    _avatarWhitelist = domainSettings[AVATARS_SETTINGS_KEY].toObject()[AVATAR_WHITELIST_OPTION].toString(AVATAR_WHITELIST_DEFAULT).split(',', QString::KeepEmptyParts);
+
+     static const QString REPLACEMENT_AVATAR_OPTION = "replacement_avatar";
+    _replacementAvatar = domainSettings[AVATARS_SETTINGS_KEY].toObject()[REPLACEMENT_AVATAR_OPTION].toString(REPLACEMENT_AVATAR_DEFAULT);
+
+    if ((_avatarWhitelist.count() == 1) && _avatarWhitelist[0].isEmpty()) {
+        _avatarWhitelist.clear(); // KeepEmptyParts above will parse "," as ["", ""] (which is ok), but "" as [""] (which is not ok).
+    }
+    if (_avatarWhitelist.isEmpty()) {
+        qCDebug(avatars) << "All avatars are allowed.";
+    } else {
+        qCDebug(avatars) << "Avatars other than" << _avatarWhitelist << "will be replaced by" << (_replacementAvatar.isEmpty() ? "default" : _replacementAvatar);
+    }
 }

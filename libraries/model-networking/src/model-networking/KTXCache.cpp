@@ -11,18 +11,32 @@
 
 #include "KTXCache.h"
 
+#include <SettingHandle.h>
 #include <ktx/KTX.h>
 
 using File = cache::File;
 using FilePointer = cache::FilePointer;
 
+// Whenever a change is made to the serialized format for the KTX cache that isn't backward compatible,
+// this value should be incremented.  This will force the KTX cache to be wiped
+const int KTXCache::CURRENT_VERSION = 0x01;
+const int KTXCache::INVALID_VERSION = 0x00;
+const char* KTXCache::SETTING_VERSION_NAME = "hifi.ktx.cache_version";
+
 KTXCache::KTXCache(const std::string& dir, const std::string& ext) :
     FileCache(dir, ext) {
     initialize();
+
+    Setting::Handle<int> cacheVersionHandle(SETTING_VERSION_NAME, INVALID_VERSION);
+    auto cacheVersion = cacheVersionHandle.get();
+    if (cacheVersion != CURRENT_VERSION) {
+        wipe();
+        cacheVersionHandle.set(CURRENT_VERSION);
+    }
 }
 
 KTXFilePointer KTXCache::writeFile(const char* data, Metadata&& metadata) {
-    FilePointer file = FileCache::writeFile(data, std::move(metadata));
+    FilePointer file = FileCache::writeFile(data, std::move(metadata), true);
     return std::static_pointer_cast<KTXFile>(file);
 }
 
@@ -38,10 +52,3 @@ std::unique_ptr<File> KTXCache::createFile(Metadata&& metadata, const std::strin
 KTXFile::KTXFile(Metadata&& metadata, const std::string& filepath) :
     cache::File(std::move(metadata), filepath) {}
 
-std::unique_ptr<ktx::KTX> KTXFile::getKTX() const {
-    ktx::StoragePointer storage = std::make_shared<storage::FileStorage>(getFilepath().c_str());
-    if (*storage) {
-        return ktx::KTX::create(storage);
-    }
-    return {};
-}

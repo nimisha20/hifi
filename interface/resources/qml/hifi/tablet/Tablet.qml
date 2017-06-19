@@ -6,15 +6,9 @@ Item {
     id: tablet
     objectName: "tablet"
     property double micLevel: 0.8
-    property bool micEnabled: true
     property int rowIndex: 0
     property int columnIndex: 0
     property int count: (flowMain.children.length - 1)
-
-    // called by C++ code to keep mic state updated
-    function setMicEnabled(newMicEnabled) {
-        tablet.micEnabled = newMicEnabled;
-    }
 
     // called by C++ code to keep audio bar updated
     function setMicLevel(newMicLevel) {
@@ -65,7 +59,11 @@ Item {
         });
 
         // pass a reference to the tabletRoot object to the button.
-        button.tabletRoot = parent.parent;
+        if (tabletRoot) {
+            button.tabletRoot = tabletRoot;
+        } else {
+            button.tabletRoot = parent.parent;
+        }
 
         sortButtons();
 
@@ -117,8 +115,8 @@ Item {
             }
 
             Item {
-                visible: (!tablet.micEnabled && !toggleMuteMouseArea.containsMouse)
-                         || (tablet.micEnabled && toggleMuteMouseArea.containsMouse)
+                visible: (Audio.muted && !toggleMuteMouseArea.containsMouse)
+                         || (!Audio.muted && toggleMuteMouseArea.containsMouse)
 
                 Image {
                     id: muteIcon
@@ -197,12 +195,12 @@ Item {
             preventStealing: true
             propagateComposedEvents: false
             scrollGestureEnabled: false
-            onClicked: tabletRoot.toggleMicEnabled()
+            onClicked: { Audio.muted = !Audio.muted }
         }
 
         RalewaySemiBold {
             id: usernameText
-            text: tablet.parent.parent.username
+            text: tabletRoot.username
             anchors.verticalCenter: parent.verticalCenter
             anchors.right: parent.right
             anchors.rightMargin: 20
@@ -267,7 +265,7 @@ Item {
 
             PropertyChanges {
                 target: muteIcon
-                visible: micEnabled
+                visible: !Audio.muted
             }
 
             PropertyChanges {

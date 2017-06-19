@@ -221,6 +221,12 @@ void HmdDisplayPlugin::internalPresent() {
         float shiftLeftBy = getLeftCenterPixel() - (sourceSize.x / 2);
         float newWidth = sourceSize.x - shiftLeftBy;
 
+        // Experimentally adjusted the region presented in preview to avoid seeing the masked pixels and recenter the center...
+        static float SCALE_WIDTH = 0.9f;
+        static float SCALE_OFFSET = 2.0f;
+        newWidth *= SCALE_WIDTH;
+        shiftLeftBy *= SCALE_OFFSET;
+
         const unsigned int RATIO_Y = 9;
         const unsigned int RATIO_X = 16;
         glm::uvec2 originalClippedSize { newWidth, newWidth * RATIO_Y / RATIO_X };
@@ -295,16 +301,16 @@ void HmdDisplayPlugin::internalPresent() {
         image = image.mirrored();
         image = image.convertToFormat(QImage::Format_RGBA8888);
         if (!_previewTexture) {
-            _previewTexture.reset(
-                gpu::Texture::createStrict(
+            _previewTexture = gpu::Texture::createStrict(
                 gpu::Element(gpu::VEC4, gpu::NUINT8, gpu::RGBA),
                 image.width(), image.height(),
-                gpu::Sampler(gpu::Sampler::FILTER_MIN_MAG_MIP_LINEAR)));
+                gpu::Texture::MAX_NUM_MIPS,
+                gpu::Sampler(gpu::Sampler::FILTER_MIN_MAG_MIP_LINEAR));
             _previewTexture->setSource("HMD Preview Texture");
             _previewTexture->setUsage(gpu::Texture::Usage::Builder().withColor().build());
             _previewTexture->setStoredMipFormat(gpu::Element(gpu::VEC4, gpu::NUINT8, gpu::RGBA));
             _previewTexture->assignStoredMip(0, image.byteCount(), image.constBits());
-            _previewTexture->autoGenerateMips(-1);
+            _previewTexture->setAutoGenerateMips(true);
         }
         
         auto viewport = getViewportForSourceSize(uvec2(_previewTexture->getDimensions()));
@@ -591,7 +597,7 @@ void HmdDisplayPlugin::OverlayRenderer::updatePipeline() {
         auto ps = gpu::Shader::createPixel(fsSource.toLocal8Bit().toStdString());
         auto program = gpu::Shader::createProgram(vs, ps);
         gpu::gl::GLBackend::makeProgram(*program, gpu::Shader::BindingSet());
-        this->uniformsLocation = program->getBuffers().findLocation("overlayBuffer");
+        this->uniformsLocation = program->getUniformBuffers().findLocation("overlayBuffer");
 
         gpu::StatePointer state = gpu::StatePointer(new gpu::State());
         state->setDepthTest(gpu::State::DepthTest(false));

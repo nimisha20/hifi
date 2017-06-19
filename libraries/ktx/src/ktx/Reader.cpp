@@ -144,27 +144,41 @@ namespace ktx {
         while ((currentPtr - srcBytes) + sizeof(uint32_t) <= (srcSize)) {
 
             // Grab the imageSize coming up
+            uint32_t imageOffset = currentPtr - srcBytes;
             size_t imageSize = *reinterpret_cast<const uint32_t*>(currentPtr);
             currentPtr += sizeof(uint32_t);
 
+            auto expectedImageSize = header.evalImageSize((uint32_t) images.size());
+            if (imageSize != expectedImageSize) {
+                break;
+            } else if (!checkAlignment(imageSize)) {
+                break;
+            }
+
+            // The image size is the face size, beware!
+            size_t faceSize = imageSize;
+            if (numFaces == NUM_CUBEMAPFACES) {
+                imageSize = NUM_CUBEMAPFACES * faceSize;
+            }
+
             // If enough data ahead then capture the pointer
             if ((currentPtr - srcBytes) + imageSize <= (srcSize)) {
-                auto padding = Header::evalPadding(imageSize);
+                auto padding = evalPadding(imageSize);
 
                 if (numFaces == NUM_CUBEMAPFACES) {
-                    size_t faceSize = imageSize / NUM_CUBEMAPFACES;
                     Image::FaceBytes faces(NUM_CUBEMAPFACES);
                     for (uint32_t face = 0; face < NUM_CUBEMAPFACES; face++) {
                         faces[face] = currentPtr;
                         currentPtr += faceSize;
                     }
-                    images.emplace_back(Image((uint32_t) faceSize, padding, faces));
+                    images.emplace_back(Image(imageOffset, (uint32_t) faceSize, padding, faces));
                     currentPtr += padding;
                 } else {
-                    images.emplace_back(Image((uint32_t) imageSize, padding, currentPtr));
+                    images.emplace_back(Image(imageOffset, (uint32_t) imageSize, padding, currentPtr));
                     currentPtr += imageSize + padding;
                 }
             } else {
+                // Stop here
                 break;
             }
         }
@@ -173,7 +187,7 @@ namespace ktx {
     }
 
     std::unique_ptr<KTX> KTX::create(const StoragePointer& src) {
-        if (!src) {
+        if (!src || !(*src)) {
             return nullptr;
         }
 
@@ -185,10 +199,14 @@ namespace ktx {
         result->resetStorage(src);
 
         // read metadata
-        result->_keyValues = parseKeyValues(result->getHeader()->bytesOfKeyValueData, result->getKeyValueData());
+        result->_keyValues = parseKeyValues(result->getHeader().bytesOfKeyValueData, result->getKeyValueData());
 
         // populate image table
-        result->_images = parseImages(*result->getHeader(), result->getTexelsDataSize(), result->getTexelsData());
+        result->_images = parseImages(result->getHeader(), result->getTexelsDataSize(), result->getTexelsData());
+        if (result->_images.size() != result->getHeader().getNumberOfLevels()) {
+            // Fail if the number of images produced doesn't match the header number of levels
+            return nullptr;
+        }
 
         return result;
     }

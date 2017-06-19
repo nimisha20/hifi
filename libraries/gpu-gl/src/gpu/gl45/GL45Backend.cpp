@@ -18,10 +18,10 @@ Q_LOGGING_CATEGORY(gpugl45logging, "hifi.gpu.gl45")
 using namespace gpu;
 using namespace gpu::gl45;
 
+const std::string GL45Backend::GL45_VERSION { "GL45" };
+
 void GL45Backend::recycle() const {
     Parent::recycle();
-    GL45VariableAllocationTexture::manageMemory();
-    GL45VariableAllocationTexture::_frameTexturesCreated = 0;
 }
 
 void GL45Backend::do_draw(const Batch& batch, size_t paramOffset) {

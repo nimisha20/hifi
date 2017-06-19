@@ -18,7 +18,6 @@
 #include <glm/gtx/component_wise.hpp>
 
 #include <QtCore/QDebug>
-#include <QtCore/QThread>
 
 #include <NumericalConstants.h>
 #include "../gl/GLTexelFormat.h"
@@ -68,7 +67,7 @@ GLTexture* GL45Backend::syncGPUObject(const TexturePointer& texturePointer) {
 #else 
                     object = new GL45ResourceTexture(shared_from_this(), texture);
 #endif
-                    GL45VariableAllocationTexture::addMemoryManagedTexture(texturePointer);
+                    GLVariableAllocationSupport::addMemoryManagedTexture(texturePointer);
                 } else {
                     auto fallback = texturePointer->getFallbackTexture();
                     if (fallback) {
@@ -80,6 +79,19 @@ GLTexture* GL45Backend::syncGPUObject(const TexturePointer& texturePointer) {
 
             default:
                 Q_UNREACHABLE();
+        }
+    } else {
+
+        if (texture.getUsageType() == TextureUsageType::RESOURCE) {
+            auto varTex = static_cast<GL45VariableAllocationTexture*> (object);
+
+            if (varTex->_minAllocatedMip > 0) {
+                auto minAvailableMip = texture.minAvailableMipLevel();
+                if (minAvailableMip < varTex->_minAllocatedMip) {
+                    varTex->_minAllocatedMip = minAvailableMip;
+                    GL45VariableAllocationTexture::_memoryPressureStateStale = true;
+                }
+            }
         }
     }
 
@@ -104,12 +116,15 @@ using GL45Texture = GL45Backend::GL45Texture;
 
 GL45Texture::GL45Texture(const std::weak_ptr<GLBackend>& backend, const Texture& texture)
     : GLTexture(backend, texture, allocate(texture)) {
-    incrementTextureGPUCount();
 }
 
 GLuint GL45Texture::allocate(const Texture& texture) {
     GLuint result;
     glCreateTextures(getGLTextureType(texture), 1, &result);
+#ifdef DEBUG
+    auto source = texture.source();
+    glObjectLabel(GL_TEXTURE, result, (GLsizei)source.length(), source.data());
+#endif
     return result;
 }
 
@@ -118,36 +133,58 @@ void GL45Texture::generateMips() const {
     (void)CHECK_GL_ERROR();
 }
 
-void GL45Texture::copyMipFaceLinesFromTexture(uint16_t mip, uint8_t face, const uvec3& size, uint32_t yOffset, GLenum format, GLenum type, const void* sourcePointer) const {
+Size GL45Texture::copyMipFaceLinesFromTexture(uint16_t mip, uint8_t face, const uvec3& size, uint32_t yOffset, GLenum internalFormat, GLenum format, GLenum type, Size sourceSize, const void* sourcePointer) const {
+    Size amountCopied = sourceSize;
     if (GL_TEXTURE_2D == _target) {
-        glTextureSubImage2D(_id, mip, 0, yOffset, size.x, size.y, format, type, sourcePointer);
+        switch (internalFormat) {
+            case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
+            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
+            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
+            case GL_COMPRESSED_RED_RGTC1:
+            case GL_COMPRESSED_RG_RGTC2:
+            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+                glCompressedTextureSubImage2D(_id, mip, 0, yOffset, size.x, size.y, internalFormat,
+                                              static_cast<GLsizei>(sourceSize), sourcePointer);
+                break;
+            default:
+                glTextureSubImage2D(_id, mip, 0, yOffset, size.x, size.y, format, type, sourcePointer);
+                break;
+        }
     } else if (GL_TEXTURE_CUBE_MAP == _target) {
-        // DSA ARB does not work on AMD, so use EXT
-        // unless EXT is not available on the driver
-        if (glTextureSubImage2DEXT) {
-            auto target = GLTexture::CUBE_FACE_LAYOUT[face];
-            glTextureSubImage2DEXT(_id, target, mip, 0, yOffset, size.x, size.y, format, type, sourcePointer);
-        } else {
-            glTextureSubImage3D(_id, mip, 0, yOffset, face, size.x, size.y, 1, format, type, sourcePointer);
+        switch (internalFormat) {
+            case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
+            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
+            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
+            case GL_COMPRESSED_RED_RGTC1:
+            case GL_COMPRESSED_RG_RGTC2:
+            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+                if (glCompressedTextureSubImage2DEXT) {
+                    auto target = GLTexture::CUBE_FACE_LAYOUT[face];
+                    glCompressedTextureSubImage2DEXT(_id, target, mip, 0, yOffset, size.x, size.y, internalFormat,
+                                                     static_cast<GLsizei>(sourceSize), sourcePointer);
+                } else {
+                    glCompressedTextureSubImage3D(_id, mip, 0, yOffset, face, size.x, size.y, 1, internalFormat,
+                                                  static_cast<GLsizei>(sourceSize), sourcePointer);
+                }
+                break;
+            default:
+                // DSA ARB does not work on AMD, so use EXT
+                // unless EXT is not available on the driver
+                if (glTextureSubImage2DEXT) {
+                    auto target = GLTexture::CUBE_FACE_LAYOUT[face];
+                    glTextureSubImage2DEXT(_id, target, mip, 0, yOffset, size.x, size.y, format, type, sourcePointer);
+                } else {
+                    glTextureSubImage3D(_id, mip, 0, yOffset, face, size.x, size.y, 1, format, type, sourcePointer);
+                }
+                break;
         }
     } else {
-        Q_ASSERT(false);
+        assert(false);
+        amountCopied = 0;
     }
     (void)CHECK_GL_ERROR();
-}
 
-void GL45Texture::copyMipFaceFromTexture(uint16_t sourceMip, uint16_t targetMip, uint8_t face) const {
-    if (!_gpuObject.isStoredMipFaceAvailable(sourceMip)) {
-        return;
-    }
-    auto size = _gpuObject.evalMipDimensions(sourceMip);
-    auto mipData = _gpuObject.accessStoredMipFace(sourceMip, face);
-    if (mipData) {
-        GLTexelFormat texelFormat = GLTexelFormat::evalGLTexelFormat(_gpuObject.getTexelFormat(), _gpuObject.getStoredMipFormat());
-        copyMipFaceLinesFromTexture(targetMip, face, size, 0, texelFormat.format, texelFormat.type, mipData->readData());
-    } else {
-         qCDebug(gpugllogging) << "Missing mipData level=" << sourceMip << " face=" << (int)face << " for texture " << _gpuObject.source().c_str();
-    }
+    return amountCopied;
 }
 
 void GL45Texture::syncSampler() const {
@@ -167,8 +204,10 @@ void GL45Texture::syncSampler() const {
     glTextureParameteri(_id, GL_TEXTURE_WRAP_S, WRAP_MODES[sampler.getWrapModeU()]);
     glTextureParameteri(_id, GL_TEXTURE_WRAP_T, WRAP_MODES[sampler.getWrapModeV()]);
     glTextureParameteri(_id, GL_TEXTURE_WRAP_R, WRAP_MODES[sampler.getWrapModeW()]);
+
     glTextureParameterf(_id, GL_TEXTURE_MAX_ANISOTROPY_EXT, sampler.getMaxAnisotropy());
     glTextureParameterfv(_id, GL_TEXTURE_BORDER_COLOR, (const float*)&sampler.getBorderColor());
+
     glTextureParameterf(_id, GL_TEXTURE_MIN_LOD, sampler.getMinMip());
     glTextureParameterf(_id, GL_TEXTURE_MAX_LOD, (sampler.getMaxMip() == Sampler::MAX_MIP_LEVEL ? 1000.f : sampler.getMaxMip()));
 }
@@ -186,10 +225,12 @@ GL45FixedAllocationTexture::~GL45FixedAllocationTexture() {
 void GL45FixedAllocationTexture::allocateStorage() const {
     const GLTexelFormat texelFormat = GLTexelFormat::evalGLTexelFormat(_gpuObject.getTexelFormat());
     const auto dimensions = _gpuObject.getDimensions();
-    const auto mips = _gpuObject.getNumMipLevels();
+    const auto mips = _gpuObject.getNumMips();
 
     glTextureStorage2D(_id, mips, texelFormat.internalFormat, dimensions.x, dimensions.y);
+
     glTextureParameteri(_id, GL_TEXTURE_BASE_LEVEL, 0);
+    glTextureParameteri(_id, GL_TEXTURE_MAX_LEVEL, mips - 1);
 }
 
 void GL45FixedAllocationTexture::syncSampler() const {
@@ -205,18 +246,23 @@ void GL45FixedAllocationTexture::syncSampler() const {
 using GL45AttachmentTexture = GL45Backend::GL45AttachmentTexture;
 
 GL45AttachmentTexture::GL45AttachmentTexture(const std::weak_ptr<GLBackend>& backend, const Texture& texture) : GL45FixedAllocationTexture(backend, texture) {
-    Backend::updateTextureGPUFramebufferMemoryUsage(0, size());
+    Backend::textureFramebufferCount.increment();
+    Backend::textureFramebufferGPUMemSize.update(0, size());
 }
 
 GL45AttachmentTexture::~GL45AttachmentTexture() {
-    Backend::updateTextureGPUFramebufferMemoryUsage(size(), 0);
+    Backend::textureFramebufferCount.decrement();
+    Backend::textureFramebufferGPUMemSize.update(size(), 0);
 }
 
 // Strict resource textures
 using GL45StrictResourceTexture = GL45Backend::GL45StrictResourceTexture;
 
 GL45StrictResourceTexture::GL45StrictResourceTexture(const std::weak_ptr<GLBackend>& backend, const Texture& texture) : GL45FixedAllocationTexture(backend, texture) {
-    auto mipLevels = _gpuObject.getNumMipLevels();
+    Backend::textureResidentCount.increment();
+    Backend::textureResidentGPUMemSize.update(0, size());
+
+    auto mipLevels = _gpuObject.getNumMips();
     for (uint16_t sourceMip = 0; sourceMip < mipLevels; ++sourceMip) {
         uint16_t targetMip = sourceMip;
         size_t maxFace = GLTexture::getFaceCount(_target);
@@ -227,5 +273,10 @@ GL45StrictResourceTexture::GL45StrictResourceTexture(const std::weak_ptr<GLBacke
     if (texture.isAutogenerateMips()) {
         generateMips();
     }
+}
+
+GL45StrictResourceTexture::~GL45StrictResourceTexture() {
+    Backend::textureResidentCount.decrement();
+    Backend::textureResidentGPUMemSize.update(size(), 0);
 }
 

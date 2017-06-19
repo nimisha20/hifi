@@ -48,8 +48,8 @@
 #include <gpu/StandardShaderLib.h>
 
 #include <SimpleEntitySimulation.h>
-#include <EntityActionInterface.h>
-#include <EntityActionFactoryInterface.h>
+#include <EntityDynamicInterface.h>
+#include <EntityDynamicFactoryInterface.h>
 #include <WebEntityItem.h>
 #include <OctreeUtils.h>
 #include <render/Engine.h>
@@ -109,7 +109,7 @@ public:
     }
 };
 
-class QWindowCamera : public Camera {
+class QWindowCamera : public SimpleCamera {
     Key forKey(int key) {
         switch (key) {
             case Qt::Key_W: return FORWARD;
@@ -365,17 +365,17 @@ public:
     }
 };
 
-class TestActionFactory : public EntityActionFactoryInterface {
+class TestActionFactory : public EntityDynamicFactoryInterface {
 public:
-    virtual EntityActionPointer factory(EntityActionType type,
+    virtual EntityDynamicPointer factory(EntityDynamicType type,
         const QUuid& id,
         EntityItemPointer ownerEntity,
         QVariantMap arguments) override {
-        return EntityActionPointer();
+        return EntityDynamicPointer();
     }
 
 
-    virtual EntityActionPointer factoryBA(EntityItemPointer ownerEntity, QByteArray data) override {
+    virtual EntityDynamicPointer factoryBA(EntityItemPointer ownerEntity, QByteArray data) override {
         return nullptr;
     }
 };
@@ -475,7 +475,7 @@ protected:
 public:
     //"/-17.2049,-8.08629,-19.4153/0,0.881994,0,-0.47126"
     static void setup() {
-        DependencyManager::registerInheritance<EntityActionFactoryInterface, TestActionFactory>();
+        DependencyManager::registerInheritance<EntityDynamicFactoryInterface, TestActionFactory>();
         DependencyManager::registerInheritance<LimitedNodeList, NodeList>();
         DependencyManager::registerInheritance<SpatialParentFinder, ParentFinder>();
         DependencyManager::set<tracing::Tracer>();
@@ -507,7 +507,6 @@ public:
         REGISTER_ENTITY_TYPE_WITH_FACTORY(Web, WebEntityItem::factory);
 
         DependencyManager::set<ParentFinder>(_octree->getTree());
-        getEntities()->setViewFrustum(_viewFrustum);
         auto nodeList = DependencyManager::get<LimitedNodeList>();
         NodePermissions permissions;
         permissions.setAll(true);
@@ -543,9 +542,9 @@ public:
         assert(items.canCast<RenderFetchCullSortTask::Output>());
         static const QString RENDER_FORWARD = "HIFI_RENDER_FORWARD";
         if (QProcessEnvironment::systemEnvironment().contains(RENDER_FORWARD)) {
-            _renderEngine->addJob<RenderForwardTask>("RenderForwardTask", items.get<RenderFetchCullSortTask::Output>());
+            _renderEngine->addJob<RenderForwardTask>("RenderForwardTask", items);
         } else {
-            _renderEngine->addJob<RenderDeferredTask>("RenderDeferredTask", items.get<RenderFetchCullSortTask::Output>());
+            _renderEngine->addJob<RenderDeferredTask>("RenderDeferredTask", items);
         }
         _renderEngine->load();
         _renderEngine->registerScene(_main3DScene);
@@ -735,8 +734,8 @@ private:
     class EntityUpdateOperator : public RecurseOctreeOperator {
     public:
         EntityUpdateOperator(const qint64& now) : now(now) {}
-        bool preRecursion(OctreeElementPointer element) override { return true; }
-        bool postRecursion(OctreeElementPointer element) override {
+        bool preRecursion(const OctreeElementPointer& element) override { return true; }
+        bool postRecursion(const OctreeElementPointer& element) override {
             EntityTreeElementPointer entityTreeElement = std::static_pointer_cast<EntityTreeElement>(element);
             entityTreeElement->forEachEntity([&](EntityItemPointer entityItem) {
                 if (!entityItem->isParentIDValid()) {
@@ -753,8 +752,8 @@ private:
     void updateText() {
         QString title = QString("FPS %1 Culling %2 TextureMemory GPU %3 CPU %4 Max GPU %5")
             .arg(_fps).arg(_cullingEnabled)
-            .arg(toHumanSize(gpu::Context::getTextureGPUMemoryUsage(), 2))
-            .arg(toHumanSize(gpu::Texture::getTextureCPUMemoryUsage(), 2))
+            .arg(toHumanSize(gpu::Context::getTextureGPUMemSize(), 2))
+            .arg(toHumanSize(gpu::Texture::getTextureCPUMemSize(), 2))
             .arg(toHumanSize(gpu::Texture::getAllowedGPUMemoryUsage(), 2));
         setTitle(title);
 #if 0
@@ -865,7 +864,6 @@ private:
             }
         }
 
-        getEntities()->setViewFrustum(_viewFrustum);
         EntityUpdateOperator updateOperator(now);
         //getEntities()->getTree()->recurseTreeWithOperator(&updateOperator);
         {
@@ -880,7 +878,7 @@ private:
         getEntities()->update();
 
         // The pending changes collecting the changes here
-        render::PendingChanges pendingChanges;
+        render::Transaction transaction;
 
         // FIXME: Move this out of here!, Background / skybox should be driven by the enityt content just like the other entities
         // Background rendering decision
@@ -888,7 +886,7 @@ private:
             auto backgroundRenderData = std::make_shared<BackgroundRenderData>();
             auto backgroundRenderPayload = std::make_shared<BackgroundRenderData::Payload>(backgroundRenderData);
             BackgroundRenderData::_item = _main3DScene->allocateID();
-            pendingChanges.resetItem(BackgroundRenderData::_item, backgroundRenderPayload);
+            transaction.resetItem(BackgroundRenderData::_item, backgroundRenderPayload);
         }
         // Setup the current Zone Entity lighting
         {
@@ -897,10 +895,10 @@ private:
         }
 
         {
-            PerformanceTimer perfTimer("SceneProcessPendingChanges");
-            _main3DScene->enqueuePendingChanges(pendingChanges);
+            PerformanceTimer perfTimer("SceneProcessTransaction");
+            _main3DScene->enqueueTransaction(transaction);
 
-            _main3DScene->processPendingChangesQueue();
+            _main3DScene->processTransactionQueue();
         }
 
     }
@@ -914,13 +912,13 @@ private:
         PROFILE_RANGE(render, __FUNCTION__);
         PerformanceTimer perfTimer("draw");
         // The pending changes collecting the changes here
-        render::PendingChanges pendingChanges;
+        render::Transaction transaction;
         // Setup the current Zone Entity lighting
         DependencyManager::get<DeferredLightingEffect>()->setGlobalLight(_sunSkyStage.getSunLight());
         {
-            PerformanceTimer perfTimer("SceneProcessPendingChanges");
-            _main3DScene->enqueuePendingChanges(pendingChanges);
-            _main3DScene->processPendingChangesQueue();
+            PerformanceTimer perfTimer("SceneProcessTransaction");
+            _main3DScene->enqueueTransaction(transaction);
+            _main3DScene->processTransactionQueue();
         }
 
         // For now every frame pass the renderContext
@@ -1067,7 +1065,7 @@ private:
     }
 
     void cycleMode() {
-        static auto defaultProjection = Camera().matrices.perspective;
+        static auto defaultProjection = SimpleCamera().matrices.perspective;
         _renderMode = (RenderMode)((_renderMode + 1) % RENDER_MODE_COUNT);
         if (_renderMode == HMD) {
             _camera.matrices.perspective[0] = vec4 { 0.759056330, 0.000000000, 0.000000000, 0.000000000 };

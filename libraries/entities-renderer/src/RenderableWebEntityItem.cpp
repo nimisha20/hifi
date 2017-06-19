@@ -127,7 +127,7 @@ bool RenderableWebEntityItem::buildWebSurface(QSharedPointer<EntityTreeRenderer>
 
     _webSurface->resume();
     _webSurface->getRootItem()->setProperty("url", _sourceUrl);
-    _webSurface->getRootContext()->setContextProperty("desktop", QVariant());
+    _webSurface->getSurfaceContext()->setContextProperty("desktop", QVariant());
     // FIXME - Keyboard HMD only: Possibly add "HMDinfo" object to context for WebView.qml.
 
     // forward web events to EntityScriptingInterface
@@ -198,7 +198,7 @@ void RenderableWebEntityItem::render(RenderArgs* args) {
     #endif
 
     if (!_webSurface) {
-        auto renderer = qSharedPointerCast<EntityTreeRenderer>(args->_renderer);
+        auto renderer = qSharedPointerCast<EntityTreeRenderer>(args->_renderData);
         if (!buildWebSurface(renderer)) {
             return;
         }
@@ -216,7 +216,7 @@ void RenderableWebEntityItem::render(RenderArgs* args) {
 
     if (!_texture) {
         auto webSurface = _webSurface;
-        _texture = gpu::TexturePointer(gpu::Texture::createExternal(OffscreenQmlSurface::getDiscardLambda()));
+        _texture = gpu::Texture::createExternal(OffscreenQmlSurface::getDiscardLambda());
         _texture->setSource(__FUNCTION__);
     }
     OffscreenQmlSurface::TextureAndFence newTextureAndFence;
@@ -266,12 +266,12 @@ void RenderableWebEntityItem::loadSourceURL() {
             _webSurface->setMaxFps(DEFAULT_MAX_FPS);
         }
 
-        _webSurface->load("WebView.qml", [&](QQmlContext* context, QObject* obj) {
+        _webSurface->load("WebEntityView.qml", [&](QQmlContext* context, QObject* obj) {
             context->setContextProperty("eventBridgeJavaScriptToInject", QVariant(_javaScriptToInject));
         });
 
         _webSurface->getRootItem()->setProperty("url", _sourceUrl);
-        _webSurface->getRootContext()->setContextProperty("desktop", QVariant());
+        _webSurface->getSurfaceContext()->setContextProperty("desktop", QVariant());
 
     } else {
         _contentType = qmlContent;
@@ -284,7 +284,7 @@ void RenderableWebEntityItem::loadSourceURL() {
                                                        _webSurface->getRootItem(), _webSurface.data());
         }
     }
-    _webSurface->getRootContext()->setContextProperty("globalPosition", vec3toVariant(getPosition()));
+    _webSurface->getSurfaceContext()->setContextProperty("globalPosition", vec3toVariant(getPosition()));
 }
 
 
@@ -420,7 +420,7 @@ void RenderableWebEntityItem::update(const quint64& now) {
 
     if (_webSurface) {
         // update globalPosition
-        _webSurface->getRootContext()->setContextProperty("globalPosition", vec3toVariant(getPosition()));
+        _webSurface->getSurfaceContext()->setContextProperty("globalPosition", vec3toVariant(getPosition()));
     }
 
     auto interval = now - _lastRenderTime;

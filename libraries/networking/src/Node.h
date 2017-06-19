@@ -24,7 +24,7 @@
 #include <QReadLocker>
 #include <UUIDHasher.h>
 
-#include <tbb/concurrent_unordered_set.h>
+#include <TBBHelpers.h>
 
 #include "HifiSockAddr.h"
 #include "NetworkPeer.h"
@@ -40,7 +40,7 @@ public:
     Node(const QUuid& uuid, NodeType_t type,
          const HifiSockAddr& publicSocket, const HifiSockAddr& localSocket,
          const NodePermissions& permissions, const QUuid& connectionSecret = QUuid(),
-         QObject* parent = 0);
+         QObject* parent = nullptr);
 
     bool operator==(const Node& otherNode) const { return _uuid == otherNode._uuid; }
     bool operator!=(const Node& otherNode) const { return !(*this == otherNode); }
@@ -53,9 +53,6 @@ public:
 
     NodeData* getLinkedData() const { return _linkedData.get(); }
     void setLinkedData(std::unique_ptr<NodeData> linkedData) { _linkedData = std::move(linkedData); }
-
-    bool isAlive() const { return _isAlive; }
-    void setAlive(bool isAlive) { _isAlive = isAlive; }
 
     int getPingMs() const { return _pingMs; }
     void setPingMs(int pingMs) { _pingMs = pingMs; }
@@ -92,7 +89,6 @@ private:
 
     QUuid _connectionSecret;
     std::unique_ptr<NodeData> _linkedData;
-    bool _isAlive;
     int _pingMs;
     qint64 _clockSkewUsec;
     QMutex _mutex;

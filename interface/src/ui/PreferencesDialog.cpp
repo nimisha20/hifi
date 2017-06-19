@@ -11,7 +11,6 @@
 #include <AudioClient.h>
 #include <avatar/AvatarManager.h>
 #include <devices/DdeFaceTracker.h>
-#include <devices/Faceshift.h>
 #include <NetworkingConstants.h>
 #include <ScriptEngines.h>
 #include <OffscreenUi.h>
@@ -103,11 +102,6 @@ void setupPreferences() {
         preferences->addPreference(new CheckPreference(UI_CATEGORY, "HMD Tablet Becomes Toolbar", getter, setter));
     }
     {
-        auto getter = []()->bool { return qApp->getTabletVisibleToOthersSetting(); };
-        auto setter = [](bool value) { qApp->setTabletVisibleToOthersSetting(value); };
-        preferences->addPreference(new CheckPreference(UI_CATEGORY, "Tablet Is Visible To Others", getter, setter));
-    }
-    {
         auto getter = []()->bool { return qApp->getPreferAvatarFingerOverStylus(); };
         auto setter = [](bool value) { qApp->setPreferAvatarFingerOverStylus(value); };
         preferences->addPreference(new CheckPreference(UI_CATEGORY, "Prefer Avatar Finger Over Stylus", getter, setter));
@@ -117,14 +111,9 @@ void setupPreferences() {
     static const QString SNAPSHOTS { "Snapshots" };
     {
         auto getter = []()->QString { return Snapshot::snapshotsLocation.get(); };
-        auto setter = [](const QString& value) { Snapshot::snapshotsLocation.set(value); };
+        auto setter = [](const QString& value) { Snapshot::snapshotsLocation.set(value); emit DependencyManager::get<Snapshot>()->snapshotLocationSet(value); };
         auto preference = new BrowsePreference(SNAPSHOTS, "Put my snapshots here", getter, setter);
         preferences->addPreference(preference);
-    }
-    {
-        auto getter = []()->bool { return SnapshotAnimated::alsoTakeAnimatedSnapshot.get(); };
-        auto setter = [](bool value) { SnapshotAnimated::alsoTakeAnimatedSnapshot.set(value); };
-        preferences->addPreference(new CheckPreference(SNAPSHOTS, "Take Animated GIF Snapshot", getter, setter));
     }
     {
         auto getter = []()->float { return SnapshotAnimated::snapshotAnimatedDuration.get(); };
@@ -213,13 +202,6 @@ void setupPreferences() {
         preferences->addPreference(new SliderPreference(AVATAR_TUNING, "Face tracker eye deflection", getter, setter));
     }
     {
-        auto getter = []()->QString { return DependencyManager::get<Faceshift>()->getHostname(); };
-        auto setter = [](const QString& value) { DependencyManager::get<Faceshift>()->setHostname(value); };
-        auto preference = new EditPreference(AVATAR_TUNING, "Faceshift hostname", getter, setter);
-        preference->setPlaceholderText("localhost");
-        preferences->addPreference(preference);
-    }
-    {
         auto getter = [=]()->QString { return myAvatar->getAnimGraphOverrideUrl().toString(); };
         auto setter = [=](const QString& value) { myAvatar->setAnimGraphOverrideUrl(QUrl(value)); };
         auto preference = new EditPreference(AVATAR_TUNING, "Avatar animation JSON", getter, setter);
@@ -245,17 +227,17 @@ void setupPreferences() {
         preferences->addPreference(preference);
     }
 
-    static const QString AUDIO("Audio");
+    static const QString AUDIO_BUFFERS("Audio Buffers");
     {
         auto getter = []()->bool { return !DependencyManager::get<AudioClient>()->getReceivedAudioStream().dynamicJitterBufferEnabled(); };
         auto setter = [](bool value) { DependencyManager::get<AudioClient>()->getReceivedAudioStream().setDynamicJitterBufferEnabled(!value); };
-        auto preference = new CheckPreference(AUDIO, "Disable dynamic jitter buffer", getter, setter);
+        auto preference = new CheckPreference(AUDIO_BUFFERS, "Disable dynamic jitter buffer", getter, setter);
         preferences->addPreference(preference);
     }
     {
         auto getter = []()->float { return DependencyManager::get<AudioClient>()->getReceivedAudioStream().getStaticJitterBufferFrames(); };
         auto setter = [](float value) { DependencyManager::get<AudioClient>()->getReceivedAudioStream().setStaticJitterBufferFrames(value); };
-        auto preference = new SpinnerPreference(AUDIO, "Static jitter buffer frames", getter, setter);
+        auto preference = new SpinnerPreference(AUDIO_BUFFERS, "Static jitter buffer frames", getter, setter);
         preference->setMin(0);
         preference->setMax(2000);
         preference->setStep(1);
@@ -264,13 +246,13 @@ void setupPreferences() {
     {
         auto getter = []()->bool { return !DependencyManager::get<AudioClient>()->getOutputStarveDetectionEnabled(); };
         auto setter = [](bool value) { DependencyManager::get<AudioClient>()->setOutputStarveDetectionEnabled(!value); };
-        auto preference = new CheckPreference(AUDIO, "Disable output starve detection", getter, setter);
+        auto preference = new CheckPreference(AUDIO_BUFFERS, "Disable output starve detection", getter, setter);
         preferences->addPreference(preference);
     }
     {
         auto getter = []()->float { return DependencyManager::get<AudioClient>()->getOutputBufferSize(); };
         auto setter = [](float value) { DependencyManager::get<AudioClient>()->setOutputBufferSize(value); };
-        auto preference = new SpinnerPreference(AUDIO, "Output buffer initial frames", getter, setter);
+        auto preference = new SpinnerPreference(AUDIO_BUFFERS, "Output buffer initial frames", getter, setter);
         preference->setMin(AudioClient::MIN_BUFFER_FRAMES);
         preference->setMax(AudioClient::MAX_BUFFER_FRAMES);
         preference->setStep(1);
@@ -280,13 +262,13 @@ void setupPreferences() {
     {
         auto getter = []()->bool { return DependencyManager::get<AudioClient>()->isSimulatingJitter(); };
         auto setter = [](bool value) { return DependencyManager::get<AudioClient>()->setIsSimulatingJitter(value); };
-        auto preference = new CheckPreference(AUDIO, "Packet jitter simulator", getter, setter);
+        auto preference = new CheckPreference(AUDIO_BUFFERS, "Packet jitter simulator", getter, setter);
         preferences->addPreference(preference);
     }
     {
         auto getter = []()->float { return DependencyManager::get<AudioClient>()->getGateThreshold(); };
         auto setter = [](float value) { return DependencyManager::get<AudioClient>()->setGateThreshold(value); };
-        auto preference = new SpinnerPreference(AUDIO, "Packet throttle threshold", getter, setter);
+        auto preference = new SpinnerPreference(AUDIO_BUFFERS, "Packet throttle threshold", getter, setter);
         preference->setMin(1);
         preference->setMax(200);
         preference->setStep(1);
@@ -347,6 +329,30 @@ void setupPreferences() {
                 preference->setItems(shadowConfig->getPresetList());
                 preferences->addPreference(preference);
             }
+        }
+        {
+            auto getter = []()->bool { return image::isColorTexturesCompressionEnabled(); };
+            auto setter = [](bool value) { return image::setColorTexturesCompressionEnabled(value); };
+            auto preference = new CheckPreference(RENDER, "Compress Color Textures", getter, setter);
+            preferences->addPreference(preference);
+        }
+        {
+            auto getter = []()->bool { return image::isNormalTexturesCompressionEnabled(); };
+            auto setter = [](bool value) { return image::setNormalTexturesCompressionEnabled(value); };
+            auto preference = new CheckPreference(RENDER, "Compress Normal Textures", getter, setter);
+            preferences->addPreference(preference);
+        }
+        {
+            auto getter = []()->bool { return image::isGrayscaleTexturesCompressionEnabled(); };
+            auto setter = [](bool value) { return image::setGrayscaleTexturesCompressionEnabled(value); };
+            auto preference = new CheckPreference(RENDER, "Compress Grayscale Textures", getter, setter);
+            preferences->addPreference(preference);
+        }
+        {
+            auto getter = []()->bool { return image::isCubeTexturesCompressionEnabled(); };
+            auto setter = [](bool value) { return image::setCubeTexturesCompressionEnabled(value); };
+            auto preference = new CheckPreference(RENDER, "Compress Cube Textures", getter, setter);
+            preferences->addPreference(preference);
         }
     }
     {
